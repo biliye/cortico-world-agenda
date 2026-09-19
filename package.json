@@ -15,18 +15,22 @@
   "main": "./src/index.ts",
   "cortico": {
     "kind": "world",
-    "api": 4
+    "api": 4,
+    "consoleClient": "dist/console.js"
   },
   "files": [
     "src",
+    "dist",
     "README.md"
   ],
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
+    "build:console": "esbuild src/console/client.ts --bundle --format=esm --outfile=dist/console.js --tsconfig=tsconfig.web.json"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "esbuild": "^0.28.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

@@ -1,4 +1,4 @@
-/** Agenda World:一张共用的日程表,到点投 agenda.due 当场叫醒她;增删改查走四个工具。 */
+/** Agenda World:一张共用的日程表,到点投 agenda.due 当场叫醒她;增删改查走四个工具与控制台面板。 */
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { ToolDef, World, WorldConsoleDecl, WorldHost } from 'cortico/core/types.ts';
@@ -36,6 +36,26 @@ function parsedOf(expr: string): ParsedCron | Error {
     parsedCache.set(expr, p);
   }
   return p;
+}
+
+/** 增/改的核心结果:error 是给人看的一句话,工具加「未添加/未改」前缀,面板原样显示。 */
+type CoreOk<E> = { ok: true; entry: E };
+type CoreErr = { ok: false; notFound?: boolean; error: string };
+
+/** 面板 list 的一行:条目本体加上算好的展示字段,前端不做 cron 计算。 */
+interface EntryView {
+  id: string;
+  kind: 'cron' | 'once';
+  cron?: string;
+  at?: string;
+  prompt: string;
+  owner: 'deployer' | 'agent';
+  ownerLabel: string;
+  enabled: boolean;
+  createdAt: string;
+  lastFiredAt?: string;
+  schedule: string;
+  next: string;
 }
 
 export class AgendaWorld implements World {
@@ -76,6 +96,14 @@ export class AgendaWorld implements World {
   console(): WorldConsoleDecl {
     return {
       config: [AGENDA_CONFIG_GROUP],
+      panels: [
+        {
+          id: 'entries',
+          title: '日程条目',
+          description: '一张共用的日程表:表格化增删改,表单生成 cron;在这里加的条目记在开发者名下。',
+        },
+      ],
+      invoke: (panel, method, args) => this.invokePanel(panel, method, args),
       promptDocs: [
         {
           key: 'worlds.agenda.envPrompt',
@@ -174,6 +202,184 @@ export class AgendaWorld implements World {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // 增删改查核心:工具与控制台面板共用的唯一实现,规则只此一份。
+  // ---------------------------------------------------------------------------
+
+  private addCore(input: {
+    prompt: string;
+    cron?: string;
+    at?: string;
+    owner: AgendaEntry['owner'];
+  }): CoreOk<AgendaEntry> | CoreErr {
+    const prompt = input.prompt.trim();
+    if (prompt.length === 0) return { ok: false, error: 'prompt 不能为空。' };
+    if (prompt.length > MAX_PROMPT_CHARS) {
+      return { ok: false, error: `prompt 超过 ${MAX_PROMPT_CHARS} 字符(现在 ${prompt.length})。` };
+    }
+    const all = this.entries();
+    if (all.length >= this.opts.cfg.maxEntries) {
+      return {
+        ok: false,
+        error: `日程表已满(${all.length}/${this.opts.cfg.maxEntries})。先删掉不用的条目,或让开发者调大 worlds.agenda.maxEntries。`,
+      };
+    }
+    const hasCron = input.cron !== undefined && input.cron !== '';
+    const hasAt = input.at !== undefined && input.at !== '';
+    if (hasCron === hasAt) {
+      return {
+        ok: false,
+        error: 'cron 与 at 必须二选一——周期性的写 cron(如 30 21 * * *),一次性的写 at(如 2026-09-19T21:30)。',
+      };
+    }
+    const common = {
+      id: `ag-${randomBytes(3).toString('hex')}`,
+      prompt,
+      owner: input.owner,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+    };
+    if (hasCron) {
+      try {
+        const p = parseCron(input.cron!.trim());
+        const entry: AgendaEntry = { kind: 'cron', cron: p.normalized, ...common };
+        this.commit([...all, entry]);
+        return { ok: true, entry };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+    try {
+      const at = parseAt(input.at!.trim());
+      if (at.getTime() <= (this.opts.now?.() ?? new Date()).getTime()) {
+        return { ok: false, error: 'at 是过去的时间——错过不补,要一次性提醒就给未来的时刻。' };
+      }
+      const entry: AgendaEntry = { kind: 'once', at: formatAt(at), ...common };
+      this.commit([...all, entry]);
+      return { ok: true, entry };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private editCore(
+    id: string,
+    patch: { prompt?: string; cron?: string; at?: string; enabled?: boolean },
+  ): CoreOk<AgendaEntry> | CoreErr {
+    const e = this.entries().find((x) => x.id === id);
+    if (!e) return { ok: false, notFound: true, error: `没有 ${id || '(空 id)'} 这条;用 agenda_list 看现有条目。` };
+    const hasCron = patch.cron !== undefined && patch.cron !== '';
+    const hasAt = patch.at !== undefined && patch.at !== '';
+    if (hasCron && hasAt) return { ok: false, error: 'cron 与 at 只能给一个。' };
+    const next: AgendaEntry = { ...e };
+    if (patch.prompt !== undefined) {
+      const prompt = patch.prompt.trim();
+      if (prompt.length === 0) return { ok: false, error: 'prompt 不能为空。' };
+      if (prompt.length > MAX_PROMPT_CHARS) {
+        return { ok: false, error: `prompt 超过 ${MAX_PROMPT_CHARS} 字符(现在 ${prompt.length})。` };
+      }
+      next.prompt = prompt;
+    }
+    if (hasCron) {
+      try {
+        const p = parseCron(patch.cron!.trim());
+        next.kind = 'cron';
+        next.cron = p.normalized;
+        delete next.at;
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    } else if (hasAt) {
+      try {
+        const at = parseAt(patch.at!.trim());
+        if (at.getTime() <= (this.opts.now?.() ?? new Date()).getTime()) {
+          return { ok: false, error: 'at 是过去的时间——错过不补,要一次性提醒就给未来的时刻。' };
+        }
+        next.kind = 'once';
+        next.at = formatAt(at);
+        delete next.cron;
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+    if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled;
+    this.commit(this.entries().map((x) => (x.id === id ? next : x)));
+    return { ok: true, entry: next };
+  }
+
+  private removeCore(id: string): { ok: true; removed: AgendaEntry } | CoreErr {
+    const e = this.entries().find((x) => x.id === id);
+    if (!e) return { ok: false, notFound: true, error: `没有 ${id || '(空 id)'} 这条;用 agenda_list 看现有条目。` };
+    this.commit(this.entries().filter((x) => x.id !== id));
+    return { ok: true, removed: e };
+  }
+
+  private entryView(e: AgendaEntry): EntryView {
+    const now = this.opts.now?.() ?? new Date();
+    let expired = false;
+    if (e.kind === 'once' && e.at) {
+      const at = parseAtQuiet(e.at);
+      expired = at !== null && at.getTime() <= now.getTime();
+    }
+    return {
+      id: e.id,
+      kind: e.kind,
+      cron: e.cron,
+      at: e.at,
+      prompt: e.prompt,
+      owner: e.owner,
+      ownerLabel: e.owner === 'deployer' ? '开发者' : this.opts.botName,
+      enabled: e.enabled,
+      createdAt: e.createdAt,
+      lastFiredAt: e.lastFiredAt,
+      schedule: this.scheduleText(e),
+      next: expired ? '已过期(错过不投)' : this.nextText(e),
+    };
+  }
+
+  /** 面板调用按 (panel, method, args) 透传;args 取第一个元素当 JSON 载荷。 */
+  private async invokePanel(panel: string, method: string, args: unknown[]): Promise<unknown> {
+    if (panel !== 'entries') throw new Error(`未知面板: ${panel}`);
+    const payload = (args[0] ?? {}) as Record<string, unknown>;
+    const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+    const optStr = (v: unknown): string | undefined =>
+      typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+    switch (method) {
+      case 'list':
+        return { entries: this.entries().map((e) => this.entryView(e)) };
+      case 'add': {
+        const res = this.addCore({
+          prompt: str(payload.prompt),
+          cron: optStr(payload.cron),
+          at: optStr(payload.at),
+          owner: 'deployer',
+        });
+        return res.ok ? { ok: true, message: `已加 ${res.entry.id}`, entry: this.entryView(res.entry) } : { ok: false, error: res.error };
+      }
+      case 'edit': {
+        const res = this.editCore(str(payload.id), {
+          prompt: payload.prompt === undefined ? undefined : str(payload.prompt),
+          cron: optStr(payload.cron),
+          at: optStr(payload.at),
+          enabled: typeof payload.enabled === 'boolean' ? payload.enabled : undefined,
+        });
+        return res.ok
+          ? { ok: true, message: `已改 ${res.entry.id}`, entry: this.entryView(res.entry) }
+          : { ok: false, notFound: res.notFound, error: res.error };
+      }
+      case 'remove': {
+        const res = this.removeCore(str(payload.id));
+        return res.ok ? { ok: true, message: `已删 ${res.removed.id}` } : { ok: false, error: res.error };
+      }
+      default:
+        throw new Error(`未知方法: ${method}`);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 展示
+  // ---------------------------------------------------------------------------
+
   private scheduleText(e: AgendaEntry): string {
     if (e.kind === 'once') return `一次性 ${e.at ?? '?'}`;
     const p = parsedOf(e.cron ?? '');
@@ -193,9 +399,9 @@ export class AgendaWorld implements World {
     return next ? `下次 ${formatAt(next)}` : '没有下次(表达式在可见的未来永不命中)';
   }
 
-  private find(id: string): AgendaEntry | undefined {
-    return this.entries().find((e) => e.id === id);
-  }
+  // ---------------------------------------------------------------------------
+  // 工具:核心结果的模型话术包装
+  // ---------------------------------------------------------------------------
 
   private listTool(): ToolDef {
     return {
@@ -243,45 +449,17 @@ export class AgendaWorld implements World {
         },
         required: ['prompt'],
       },
-      handler: async (args) => this.addEntry(args),
+      handler: async (args) => {
+        const res = this.addCore({
+          prompt: typeof args.prompt === 'string' ? args.prompt : '',
+          cron: typeof args.cron === 'string' && args.cron.trim() !== '' ? args.cron.trim() : undefined,
+          at: typeof args.at === 'string' && args.at.trim() !== '' ? args.at.trim() : undefined,
+          owner: args.requestedBy === 'deployer' ? 'deployer' : 'agent',
+        });
+        if (!res.ok) return `未添加:${res.error}`;
+        return `已加:${res.entry.id} · ${this.scheduleText(res.entry)} · ${this.nextText(res.entry)} · 「${res.entry.prompt}」`;
+      },
     };
-  }
-
-  private addEntry(args: Record<string, unknown>): string {
-    const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
-    if (prompt.length === 0) return '未添加:prompt 不能为空。';
-    if (prompt.length > MAX_PROMPT_CHARS) return `未添加:prompt 超过 ${MAX_PROMPT_CHARS} 字符(现在 ${prompt.length})。`;
-    const all = this.entries();
-    if (all.length >= this.opts.cfg.maxEntries) {
-      return `未添加:日程表已满(${all.length}/${this.opts.cfg.maxEntries})。先删掉不用的条目,或让开发者调大 worlds.agenda.maxEntries。`;
-    }
-    const hasCron = typeof args.cron === 'string' && args.cron.trim() !== '';
-    const hasAt = typeof args.at === 'string' && args.at.trim() !== '';
-    if (hasCron === hasAt) {
-      return '未添加:cron 与 at 必须二选一——周期性的写 cron(如 30 21 * * *),一次性的写 at(如 2026-09-19T21:30)。';
-    }
-    let entry: AgendaEntry;
-    if (hasCron) {
-      const expr = String(args.cron).trim();
-      try {
-        const p = parseCron(expr);
-        entry = { kind: 'cron', cron: p.normalized, ...base(prompt, args) };
-      } catch (err) {
-        return `未添加:${err instanceof Error ? err.message : String(err)}`;
-      }
-    } else {
-      try {
-        const at = parseAt(String(args.at));
-        if (at.getTime() <= (this.opts.now?.() ?? new Date()).getTime()) {
-          return '未添加:at 是过去的时间——错过不补,要一次性提醒就给未来的时刻。';
-        }
-        entry = { kind: 'once', at: formatAt(at), ...base(prompt, args) };
-      } catch (err) {
-        return `未添加:${err instanceof Error ? err.message : String(err)}`;
-      }
-    }
-    this.commit([...all, entry]);
-    return `已加:${entry.id} · ${this.scheduleText(entry)} · ${this.nextText(entry)} · 「${prompt}」`;
   }
 
   private editTool(): ToolDef {
@@ -303,49 +481,17 @@ export class AgendaWorld implements World {
         },
         required: ['id'],
       },
-      handler: async (args) => this.editEntry(args),
+      handler: async (args) => {
+        const res = this.editCore(typeof args.id === 'string' ? args.id.trim() : '', {
+          prompt: typeof args.prompt === 'string' ? args.prompt : undefined,
+          cron: typeof args.cron === 'string' && args.cron.trim() !== '' ? args.cron.trim() : undefined,
+          at: typeof args.at === 'string' && args.at.trim() !== '' ? args.at.trim() : undefined,
+          enabled: typeof args.enabled === 'boolean' ? args.enabled : undefined,
+        });
+        if (!res.ok) return res.notFound ? res.error : `未改:${res.error}`;
+        return `已改:${res.entry.id} · ${this.scheduleText(res.entry)} · ${this.nextText(res.entry)} · 「${res.entry.prompt}」`;
+      },
     };
-  }
-
-  private editEntry(args: Record<string, unknown>): string {
-    const id = typeof args.id === 'string' ? args.id.trim() : '';
-    const e = this.find(id);
-    if (!e) return `没有 ${id || '(空 id)'} 这条;用 agenda_list 看现有条目。`;
-    const hasCron = typeof args.cron === 'string' && args.cron.trim() !== '';
-    const hasAt = typeof args.at === 'string' && args.at.trim() !== '';
-    if (hasCron && hasAt) return '未改:cron 与 at 只能给一个。';
-    const next: AgendaEntry = { ...e };
-    if (typeof args.prompt === 'string') {
-      const prompt = args.prompt.trim();
-      if (prompt.length === 0) return '未改:prompt 不能为空。';
-      if (prompt.length > MAX_PROMPT_CHARS) return `未改:prompt 超过 ${MAX_PROMPT_CHARS} 字符。`;
-      next.prompt = prompt;
-    }
-    if (hasCron) {
-      try {
-        const p = parseCron(String(args.cron).trim());
-        next.kind = 'cron';
-        next.cron = p.normalized;
-        delete next.at;
-      } catch (err) {
-        return `未改:${err instanceof Error ? err.message : String(err)}`;
-      }
-    } else if (hasAt) {
-      try {
-        const at = parseAt(String(args.at).trim());
-        if (at.getTime() <= (this.opts.now?.() ?? new Date()).getTime()) {
-          return '未改:at 是过去的时间——错过不补,要一次性提醒就给未来的时刻。';
-        }
-        next.kind = 'once';
-        next.at = formatAt(at);
-        delete next.cron;
-      } catch (err) {
-        return `未改:${err instanceof Error ? err.message : String(err)}`;
-      }
-    }
-    if (typeof args.enabled === 'boolean') next.enabled = args.enabled;
-    this.commit(this.entries().map((x) => (x.id === id ? next : x)));
-    return `已改:${next.id} · ${this.scheduleText(next)} · ${this.nextText(next)} · 「${next.prompt}」`;
   }
 
   private removeTool(): ToolDef {
@@ -364,24 +510,12 @@ export class AgendaWorld implements World {
         required: ['id'],
       },
       handler: async (args) => {
-        const id = typeof args.id === 'string' ? args.id.trim() : '';
-        const e = this.find(id);
-        if (!e) return `没有 ${id || '(空 id)'} 这条;用 agenda_list 看现有条目。`;
-        this.commit(this.entries().filter((x) => x.id !== id));
-        return `已删:${e.id} · 「${e.prompt}」`;
+        const res = this.removeCore(typeof args.id === 'string' ? args.id.trim() : '');
+        if (!res.ok) return res.error;
+        return `已删:${res.removed.id} · 「${res.removed.prompt}」`;
       },
     };
   }
-}
-
-function base(prompt: string, args: Record<string, unknown>): Pick<AgendaEntry, 'id' | 'prompt' | 'owner' | 'enabled' | 'createdAt'> {
-  return {
-    id: `ag-${randomBytes(3).toString('hex')}`,
-    prompt,
-    owner: args.requestedBy === 'deployer' ? 'deployer' : 'agent',
-    enabled: true,
-    createdAt: new Date().toISOString(),
-  };
 }
 
 function scheduleDesc(e: AgendaEntry): string {

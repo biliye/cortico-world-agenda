@@ -283,3 +283,53 @@ describe('声明面', () => {
     expect(h.world.console().promptDocs?.[0]?.key).toBe('worlds.agenda.envPrompt');
   });
 });
+
+describe('面板数据面(invoke)', () => {
+  it('声明 entries 面板;增删改查与工具同一套核心,面板加的条目记在开发者名下', async () => {
+    h.setClock(T(10, 21, 0, 0));
+    const decl = h.world.console();
+    expect(decl.panels?.map((p) => p.id)).toEqual(['entries']);
+    const invoke = decl.invoke!;
+    expect(await invoke('entries', 'add', [{ prompt: '面板加的', cron: '30 21 * * *' }])).toMatchObject({ ok: true });
+    expect(h.cfg.entries[0]!.owner).toBe('deployer');
+    const list = (await invoke('entries', 'list', [])) as { entries: Array<Record<string, unknown>> };
+    expect(list.entries).toHaveLength(1);
+    expect(list.entries[0]).toMatchObject({
+      schedule: '节律 30 21 * * *',
+      ownerLabel: '开发者',
+      next: '下次 2030-05-10T21:30',
+    });
+    const id = list.entries[0]!.id as string;
+    expect(await invoke('entries', 'edit', [{ id, enabled: false }])).toMatchObject({ ok: true });
+    expect(h.cfg.entries[0]!.enabled).toBe(false);
+    expect(h.persisted.length).toBeGreaterThanOrEqual(2);
+    expect(await invoke('entries', 'remove', [{ id }])).toMatchObject({ ok: true });
+    expect(h.cfg.entries).toHaveLength(0);
+  });
+
+  it('非法输入返回 {ok:false, error};未知面板与方法抛错', async () => {
+    h.setClock(T(10, 21, 0, 0));
+    const invoke = h.world.console().invoke!;
+    expect(await invoke('entries', 'add', [{ prompt: 'x' }])).toMatchObject({ ok: false });
+    expect(await invoke('entries', 'add', [{ prompt: 'x', cron: '61 * * * *' }])).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('分钟'),
+    });
+    expect(await invoke('entries', 'add', [{ prompt: 'x', at: '2030-05-10T20:00' }])).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('过去'),
+    });
+    expect(await invoke('entries', 'edit', [{ id: 'ag-none' }])).toMatchObject({ ok: false, notFound: true });
+    await expect(invoke('nope', 'list', [])).rejects.toThrow(/未知面板/);
+    await expect(invoke('entries', 'nope', [])).rejects.toThrow(/未知方法/);
+  });
+
+  it('一次性条目过期的,面板 list 标注已过期', async () => {
+    h = harness([onceEntry('2030-05-09T08:00', '迟到的')]);
+    h.setClock(T(10, 21, 0, 0));
+    const list = (await h.world.console().invoke!('entries', 'list', [])) as {
+      entries: Array<{ next: string }>;
+    };
+    expect(list.entries[0]!.next).toContain('已过期');
+  });
+});

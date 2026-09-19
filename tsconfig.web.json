@@ -1,0 +1,11 @@
+{
+  // 面板源码是浏览器侧:带 DOM,不带 node 类型。主 tsconfig 把 src/console 排除,
+  // 这份只查面板;`cortico/*` 的 paths 继承自主 tsconfig(同目录,相对路径不变)。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "ESNext.Disposable"],
+    "types": ["node"]
+  },
+  "include": ["src/console/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
