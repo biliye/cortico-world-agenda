@@ -15,9 +15,10 @@ import type {
 /** 服务端 entryView 的形状。 */
 interface EntryView {
   id: string;
-  kind: 'cron' | 'once';
+  kind: 'cron' | 'once' | 'every';
   cron?: string;
   at?: string;
+  everyMinutes?: number;
   prompt: string;
   owner: 'deployer' | 'agent';
   ownerLabel: string;
@@ -42,8 +43,8 @@ export default {
   },
 } satisfies ConsoleClientBundle;
 
-/** 周期表单的三档:每天 / 每周几 / 直接写表达式。表单的职责就是生成 cron。 */
-type ScheduleMode = 'daily' | 'weekly' | 'custom';
+/** 周期表单的四档:每天 / 每周几 / 每隔 N 分钟 / 直接写表达式。表单的职责就是生成节律。 */
+type ScheduleMode = 'daily' | 'weekly' | 'every' | 'custom';
 
 const WEEKDAYS: readonly { value: string; label: string }[] = [
   { value: '1', label: '周一' },
@@ -92,7 +93,7 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
 
   const formSheet = ui.sheet({
     title: '新增 / 编辑条目',
-    desc: '周期条目由表单生成 cron;更复杂的节律选「自定义表达式」(分 时 日 月 周,只认 * , - / 和数字)。',
+    desc: '周期条目的节律由表单生成;「每隔」填整数分钟,从上次响过那一刻起算。更复杂的节律选「自定义表达式」(分 时 日 月 周,只认 * , - / 和数字)。',
   });
   ctx.root.append(formSheet.el);
 
@@ -107,6 +108,7 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
     [
       { value: 'daily', label: '每天' },
       { value: 'weekly', label: '每周' },
+      { value: 'every', label: '每隔' },
       { value: 'custom', label: '自定义表达式' },
     ],
     { value: 'daily', onSelect: (v) => { modeValue = v as ScheduleMode; renderModeRows(); } },
@@ -119,6 +121,7 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
   weeklyTime.type = 'time';
   weeklyTime.value = '21:30';
   const dowSel = ui.select({ options: WEEKDAYS });
+  const everyInput = ui.input({ placeholder: '40', cls: 'mono' });
   const cronInput = ui.input({ placeholder: '30 21 * * *', cls: 'mono' });
   const atInput = ui.h('input', 'field') as HTMLInputElement;
   atInput.type = 'datetime-local';
@@ -129,6 +132,7 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
   weeklyRow.style.display = 'flex';
   weeklyRow.style.gap = '12px';
   weeklyRow.append(ui.field('每周几', dowSel), ui.field('几点', weeklyTime));
+  const everyRow = ui.field('每隔多少分钟', everyInput);
   const cronRow = ui.field('cron 表达式', cronInput);
   const atRow = ui.field('哪天哪点(本地时间)', atInput);
 
@@ -143,7 +147,7 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
   });
   const formRow = ui.rowbar();
   formRow.append(saveBtn, cancelBtn);
-  formSheet.body.append(kindSeg.el, modeSeg.el, dailyRow, weeklyRow, cronRow, atRow, promptArea, formRow);
+  formSheet.body.append(kindSeg.el, modeSeg.el, dailyRow, weeklyRow, everyRow, cronRow, atRow, promptArea, formRow);
   cancelBtn.style.display = 'none';
 
   renderKindRows();
@@ -155,21 +159,22 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
 
   function renderKindRows(): void {
     const cron = kindValue === 'cron';
-    dailyRow.style.display = cron ? '' : 'none';
-    weeklyRow.style.display = cron ? '' : 'none';
-    cronRow.style.display = cron ? '' : 'none';
+    everyRow.style.display = cron && modeValue === 'every' ? '' : 'none';
     atRow.style.display = cron ? 'none' : '';
     modeSeg.el.style.display = cron ? '' : 'none';
+    renderModeRows();
   }
 
   function renderModeRows(): void {
-    dailyRow.style.display = modeValue === 'daily' ? '' : 'none';
-    weeklyRow.style.display = modeValue === 'weekly' ? '' : 'none';
-    cronRow.style.display = modeValue === 'custom' ? '' : 'none';
+    const cron = kindValue === 'cron';
+    dailyRow.style.display = cron && modeValue === 'daily' ? '' : 'none';
+    weeklyRow.style.display = cron && modeValue === 'weekly' ? '' : 'none';
+    everyRow.style.display = cron && modeValue === 'every' ? '' : 'none';
+    cronRow.style.display = cron && modeValue === 'custom' ? '' : 'none';
   }
 
   /** 表单 → 服务端载荷;节律由表单档位生成,返回 null 表示前端就能看出填错了。 */
-  function buildPayload(): { prompt: string; cron?: string; at?: string } | null {
+  function buildPayload(): { prompt: string; cron?: string; at?: string; everyMinutes?: number } | null {
     const prompt = promptArea.value.trim();
     if (prompt.length === 0) {
       msgline('提示词不能为空:写下到点要让她干什么。', true);
@@ -181,6 +186,14 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
         return null;
       }
       return { prompt, at: atInput.value };
+    }
+    if (modeValue === 'every') {
+      const minutes = Number(everyInput.value.trim());
+      if (!Number.isInteger(minutes) || minutes <= 0) {
+        msgline('「每隔」填一个整数分钟数,比如 40。', true);
+        return null;
+      }
+      return { prompt, everyMinutes: minutes };
     }
     if (modeValue === 'daily' || modeValue === 'weekly') {
       const raw = (modeValue === 'daily' ? dailyTime : weeklyTime).value;
@@ -194,7 +207,7 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
     }
     const expr = cronInput.value.trim();
     if (expr === '') {
-      msgline('写一条 cron 表达式,或切回「每天/每周」让表单生成。', true);
+      msgline('写一条 cron 表达式,或切回「每天/每周/每隔」让表单生成。', true);
       return null;
     }
     return { prompt, cron: expr };
@@ -290,7 +303,7 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
     ]);
   }
 
-  /** 把一条填进表单进入编辑态;cron 尽量反推回「每天/每周」档,推不回就用自定义。 */
+  /** 把一条填进表单进入编辑态;cron 尽量反推回「每天/每周」档,推不回就用自定义表达式。 */
   function fillForm(e: EntryView): void {
     editingId = e.id;
     promptArea.value = e.prompt;
@@ -300,6 +313,12 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
       kindValue = 'once';
       kindSeg.setValue('once');
       atInput.value = e.at ?? '';
+    } else if (e.kind === 'every') {
+      kindValue = 'cron';
+      kindSeg.setValue('cron');
+      modeValue = 'every';
+      modeSeg.setValue('every');
+      everyInput.value = e.everyMinutes === undefined ? '' : String(e.everyMinutes);
     } else {
       kindValue = 'cron';
       kindSeg.setValue('cron');
@@ -329,10 +348,12 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
     editingId = null;
     promptArea.value = '';
     cronInput.value = '';
+    everyInput.value = '';
     saveBtn.textContent = '新增';
     cancelBtn.style.display = 'none';
     msgline('', false);
   }
+
 
   function msgline(text: string, bad: boolean): void {
     msg.textContent = text;

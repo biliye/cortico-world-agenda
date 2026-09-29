@@ -12,9 +12,9 @@ const TEST_CTX = {
   log: { child() { return this; }, info() {}, warn() {}, error() {}, debug() {}, trace() {}, emit() {} },
 } as unknown as ToolCallContext;
 
-function harness(entries: AgendaEntry[] = [], maxEntries = 100) {
+function harness(entries: AgendaEntry[] = [], maxEntries = 100, minIntervalMinutes = 5) {
   let current = T(10, 0, 0);
-  const cfg: AgendaConfigSection = { enabled: true, entries, maxEntries };
+  const cfg: AgendaConfigSection = { enabled: true, entries, maxEntries, minIntervalMinutes };
   const persisted: AgendaEntry[][] = [];
   const world = new AgendaWorld({
     cfg,
@@ -39,7 +39,8 @@ function harness(entries: AgendaEntry[] = [], maxEntries = 100) {
       return typeof out === 'string' ? out : out.text;
     };
   };
-  return { world, cfg, persisted, host, setClock, tool };
+  const due = () => host.events.filter((e) => e.type === 'agenda.due');
+  return { world, cfg, persisted, host, setClock, tool, due };
 }
 
 const cronEntry = (cron: string, prompt = '拍子到了', overrides: Partial<AgendaEntry> = {}): AgendaEntry => ({
@@ -61,6 +62,19 @@ const onceEntry = (at: string, prompt = '一次性拍子', overrides: Partial<Ag
   owner: 'agent',
   enabled: true,
   createdAt: '2030-05-10T00:00:00.000Z',
+  ...overrides,
+});
+
+/** 循环闹钟条目。锚点用本地时刻的绝对时刻表示,这样测试与机器时区无关。 */
+const everyEntry = (everyMinutes: number, prompt = '看一眼挡位', overrides: Partial<AgendaEntry> = {}): AgendaEntry => ({
+  id: `ag-${Math.random().toString(16).slice(2, 8)}`,
+  kind: 'every',
+  everyMinutes,
+  prompt,
+  owner: 'deployer',
+  enabled: true,
+  createdAt: '2030-05-10T00:00:00.000Z',
+  anchorAt: T(10, 10, 0).toISOString(),
   ...overrides,
 });
 
@@ -112,15 +126,32 @@ describe('到点投递', () => {
     expect(h.host.events.filter((e) => e.type === 'agenda.due')).toHaveLength(1);
   });
 
-  it('错过不补:进程「关着」跨过触发时刻,那一拍跳过', async () => {
+  it('错过补一次:进程「关着」跨过触发时刻,起来时补投一条并标注', async () => {
     h = harness([cronEntry('30 21 * * *')]);
     await h.world.start(h.host);
-    h.setClock(T(10, 22, 0, 0)); // 直接跳过 21:30
+    h.setClock(T(11, 9, 0, 0)); // 直接跳过 10 号 21:30
     await h.world.tick();
-    expect(h.host.events.filter((e) => e.type === 'agenda.due')).toHaveLength(0);
-    h.setClock(T(11, 21, 30, 5)); // 第二天正常到点才投
+    expect(h.due()).toHaveLength(1);
+    expect(h.due()[0]!.text).toContain('补投:原定 2030-05-10T21:30');
+    expect(h.due()[0]!.text).toContain('错过了 1 拍');
+    // 同一分钟再对一次表不重复投;锚点已挪到现在,下一拍是今晚 21:30
     await h.world.tick();
-    expect(h.host.events.filter((e) => e.type === 'agenda.due')).toHaveLength(1);
+    expect(h.due()).toHaveLength(1);
+    h.setClock(T(11, 21, 30, 5));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(2);
+    expect(h.due()[1]!.text).not.toContain('补投');
+  });
+
+  it('关机三天:错过几拍也只摞成一条,不逐拍追投', async () => {
+    h = harness([cronEntry('30 21 * * *')]);
+    await h.world.start(h.host);
+    h.setClock(T(13, 9, 0, 0)); // 10、11、12 号三天的 21:30 都没赶上
+    await h.world.tick();
+    expect(h.due()).toHaveLength(1);
+    expect(h.due()[0]!.text).toContain('错过了 3 拍');
+    // 锚点挪到「现在这一分钟」:补完从这刻起算,不回头追那三拍
+    expect(Date.parse(h.cfg.entries[0]!.anchorAt!)).toBe(T(13, 9, 0, 0).getTime());
   });
 
   it('一次性条目到点投出并自动删除;过期的静默不投', async () => {
@@ -169,6 +200,141 @@ describe('到点投递', () => {
   });
 });
 
+describe('循环闹钟(every)', () => {
+  it('到点才响:锚点 + 间隔那一分钟;正文带节律,循环条目响过不消失', async () => {
+    h = harness([everyEntry(40, '看一下挡位', { anchorAt: T(10, 10, 0).toISOString() })]);
+    await h.world.start(h.host);
+    h.setClock(T(10, 10, 39, 59));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(0);
+    h.setClock(T(10, 10, 40, 2));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(1);
+    expect(h.due()[0]!.text).toContain('看一下挡位');
+    expect(h.due()[0]!.text).toContain('每 40 分钟');
+    expect(h.due()[0]!.text).not.toContain('补投');
+    // 条目还在表里,下一拍接着响——这就是「提醒后不消失」
+    expect(h.cfg.entries).toHaveLength(1);
+    h.setClock(T(10, 11, 20, 1));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(2);
+  });
+
+  it('不落整点:从锚点起算,不管时钟的 0 分与 40 分', async () => {
+    h.setClock(T(10, 10, 7, 0));
+    const out = await h.tool('agenda_add')({ prompt: '看挡位', everyMinutes: 40 });
+    expect(out).toContain('已加:');
+    expect(out).toContain('每 40 分钟');
+    expect(out).toContain('下次 2030-05-10T10:47');
+    expect(out).toContain('一天最多 36 次');
+    await h.world.start(h.host);
+    h.setClock(T(10, 10, 40, 30)); // 整点的 40 分:不该响
+    await h.world.tick();
+    expect(h.due()).toHaveLength(0);
+    h.setClock(T(10, 10, 47, 5));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(1);
+  });
+
+  it('间隔越界与非整数被拒,不落账:下限看配置,上限 30 天', async () => {
+    h.setClock(T(10, 0, 0, 0));
+    const low = await h.tool('agenda_add')({ prompt: 'x', everyMinutes: 1 });
+    expect(low).toContain('未添加');
+    expect(low).toContain('至少 5 分钟');
+    expect(await h.tool('agenda_add')({ prompt: 'x', everyMinutes: 40.5 })).toContain('整数');
+    expect(await h.tool('agenda_add')({ prompt: 'x', everyMinutes: 99_999 })).toContain('30 天');
+    expect(h.cfg.entries).toHaveLength(0);
+    expect(h.persisted).toHaveLength(0);
+    // 下限是配置键,调小后 1 分钟能加
+    h = harness([], 100, 1);
+    h.setClock(T(10, 0, 0, 0));
+    expect(await h.tool('agenda_add')({ prompt: 'x', everyMinutes: 1 })).toContain('已加:');
+  });
+
+  it('节律三选一:every/cron/at 一次只给一样', async () => {
+    h.setClock(T(10, 0, 0, 0));
+    expect(await h.tool('agenda_add')({ prompt: 'x', everyMinutes: 40, cron: '30 21 * * *' })).toContain('三选一');
+    expect(await h.tool('agenda_add')({ prompt: 'x' })).toContain('三选一');
+    const added = await h.tool('agenda_add')({ prompt: 'x', everyMinutes: 40 });
+    const id = /ag-[0-9a-f]+/.exec(added)![0];
+    expect(await h.tool('agenda_edit')({ id, everyMinutes: 40, cron: '30 21 * * *' })).toContain('一次只改一样');
+    expect(h.cfg.entries).toHaveLength(1);
+  });
+
+  it('改间隔:回执报人话与一天几次,锚点从现在起算', async () => {
+    h.setClock(T(10, 10, 0, 0));
+    const added = await h.tool('agenda_add')({ prompt: '看挡位', everyMinutes: 40 });
+    const id = /ag-[0-9a-f]+/.exec(added)![0];
+    h.setClock(T(10, 10, 30, 0));
+    const edited = await h.tool('agenda_edit')({ id, everyMinutes: 90 });
+    expect(edited).toContain('每 1 小时 30 分');
+    expect(edited).toContain('下次 2030-05-10T12:00');
+    expect(edited).toContain('一天最多 16 次');
+    expect(h.cfg.entries[0]!.everyMinutes).toBe(90);
+    // 改完从现在起算:按新间隔还没到点,不立刻补响
+    await h.world.start(h.host);
+    h.setClock(T(10, 10, 31, 0));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(0);
+  });
+
+  it('停用的条目重新启用从现在起算,不补那一拍', async () => {
+    h = harness([everyEntry(40, '看挡位', { enabled: false })]);
+    await h.world.start(h.host);
+    h.setClock(T(10, 10, 55, 0));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(0);
+    expect(await h.tool('agenda_edit')({ id: h.cfg.entries[0]!.id, enabled: true })).toContain('每 40 分钟');
+    h.setClock(T(10, 10, 56, 0));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(0); // 锚点已挪到 10:55,下一拍 11:35
+    h.setClock(T(10, 11, 35, 1));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(1);
+  });
+
+  it('起来时补投一次:错过几拍摞成一条,标注原定时刻与拍数', async () => {
+    h = harness([everyEntry(40, '看挡位', { anchorAt: T(10, 10, 0).toISOString() })]);
+    h.setClock(T(10, 12, 5, 0)); // 关机跨过 10:40 / 11:20 / 12:00 三拍
+    await h.world.start(h.host);
+    expect(h.due()).toHaveLength(1);
+    expect(h.due()[0]!.text).toContain('补投:原定 2030-05-10T10:40');
+    expect(h.due()[0]!.text).toContain('错过了 3 拍');
+    // 起来后第二拍从此刻起算,且同一分钟不重复投
+    expect(Date.parse(h.cfg.entries[0]!.anchorAt!)).toBe(T(10, 12, 5, 0).getTime());
+    await h.world.start(h.host);
+    expect(h.due()).toHaveLength(1);
+    h.setClock(T(10, 12, 45, 1));
+    await h.world.tick();
+    expect(h.due()).toHaveLength(2);
+  });
+
+  it('一次性 at 不补:关机跨过那一分钟就算了,留在表里标过期', async () => {
+    h = harness([
+      onceEntry('2030-05-10T10:20', '提醒他喝水'),
+      everyEntry(40, '看挡位', { anchorAt: T(10, 10, 0).toISOString() }),
+    ]);
+    h.setClock(T(10, 12, 0, 0));
+    await h.world.start(h.host);
+    expect(h.due()).toHaveLength(1); // 只有循环那条补了
+    expect(h.due()[0]!.text).toContain('看挡位');
+    expect(h.cfg.entries.some((e) => e.kind === 'once')).toBe(true);
+  });
+
+  it('配置被手改坏(间隔 0 / 非数 / 锚点读不出)的条目跳过不炸', async () => {
+    h = harness([
+      everyEntry(0),
+      everyEntry(40, '锚点坏的', { anchorAt: '不是时间', lastFiredAt: '也不是', createdAt: '还是不是' }),
+      everyEntry(40, '好的', { anchorAt: T(10, 10, 0).toISOString() }),
+    ]);
+    h.setClock(T(10, 10, 40, 30));
+    await expect(h.world.start(h.host)).resolves.toBeUndefined();
+    await h.world.tick();
+    expect(h.due()).toHaveLength(1);
+    expect(h.due()[0]!.text).toContain('好的');
+  });
+});
+
 describe('工具:增', () => {
   it('cron 条目加成功,回执带归一化表达式与下次触发', async () => {
     h.setClock(T(10, 21, 0, 0));
@@ -192,10 +358,10 @@ describe('工具:增', () => {
     expect(h.cfg.entries).toHaveLength(1);
   });
 
-  it('cron 与 at 都给/都不给、非法 cron、空 prompt 都被拒且不落账', async () => {
+  it('节律三选一:都给/都不给、非法 cron、空 prompt 都被拒且不落账', async () => {
     h.setClock(T(10, 21, 0, 0));
-    expect(await h.tool('agenda_add')({ prompt: 'x', cron: '30 21 * * *', at: '2030-05-10T21:30' })).toContain('二选一');
-    expect(await h.tool('agenda_add')({ prompt: 'x' })).toContain('二选一');
+    expect(await h.tool('agenda_add')({ prompt: 'x', cron: '30 21 * * *', at: '2030-05-10T21:30' })).toContain('三选一');
+    expect(await h.tool('agenda_add')({ prompt: 'x' })).toContain('三选一');
     const badCron = await h.tool('agenda_add')({ prompt: 'x', cron: '61 21 * * *' });
     expect(badCron).toContain('未添加');
     expect(badCron).toContain('分钟');
@@ -279,8 +445,14 @@ describe('声明面', () => {
     const vars = h.world.envPromptVars();
     expect(vars['agenda.summary']).toBe('共 2 条(1 条停用)');
     expect(vars['agenda.maxEntries']).toBe('100');
+    expect(vars['agenda.minInterval']).toBe('5');
     expect(AGENDA_CONFIG_GROUP.id).toBe('world:agenda');
+    expect(Object.keys(AGENDA_CONFIG_GROUP.schema.properties ?? {})).toContain('worlds.agenda.minIntervalMinutes');
     expect(h.world.console().promptDocs?.[0]?.key).toBe('worlds.agenda.envPrompt');
+    // 旧部署没有这个键:按缺省 5 分钟判
+    h = harness([], 100, undefined as unknown as number);
+    expect(h.world.envPromptVars()['agenda.minInterval']).toBe('5');
+    expect(await h.tool('agenda_add')({ prompt: 'x', everyMinutes: 3 })).toContain('至少 5 分钟');
   });
 });
 
@@ -305,6 +477,24 @@ describe('面板数据面(invoke)', () => {
     expect(h.persisted.length).toBeGreaterThanOrEqual(2);
     expect(await invoke('entries', 'remove', [{ id }])).toMatchObject({ ok: true });
     expect(h.cfg.entries).toHaveLength(0);
+  });
+
+  it('面板也能加/改循环闹钟:间隔从输入框来的是字符串', async () => {
+    h.setClock(T(10, 10, 0, 0));
+    const invoke = h.world.console().invoke!;
+    expect(await invoke('entries', 'add', [{ prompt: '看挡位', everyMinutes: '40' }])).toMatchObject({ ok: true });
+    expect(h.cfg.entries[0]!.kind).toBe('every');
+    expect(h.cfg.entries[0]!.everyMinutes).toBe(40);
+    let list = (await invoke('entries', 'list', [])) as { entries: Array<Record<string, unknown>> };
+    expect(list.entries[0]).toMatchObject({ schedule: '每 40 分钟', next: '下次 2030-05-10T10:40', everyMinutes: 40 });
+    const id = list.entries[0]!.id as string;
+    expect(await invoke('entries', 'edit', [{ id, everyMinutes: '2' }])).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('至少 5 分钟'),
+    });
+    expect(await invoke('entries', 'edit', [{ id, everyMinutes: '90' }])).toMatchObject({ ok: true });
+    list = (await invoke('entries', 'list', [])) as { entries: Array<Record<string, unknown>> };
+    expect(list.entries[0]).toMatchObject({ schedule: '每 1 小时 30 分', everyMinutes: 90 });
   });
 
   it('非法输入返回 {ok:false, error};未知面板与方法抛错', async () => {

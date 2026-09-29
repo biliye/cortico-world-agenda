@@ -4,13 +4,26 @@ import { fileURLToPath } from 'node:url';
 import type { ToolDef, World, WorldConsoleDecl, WorldHost } from 'cortico/core/types.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import { AGENDA_CONFIG_GROUP, type AgendaConfigSection, type AgendaEntry } from './config.ts';
-import { cronMatches, formatAt, nextFire, parseAt, parseCron, type ParsedCron } from './cron.ts';
+import { formatAt, parseAt, parseCron } from './cron.ts';
+import {
+  anchorOf,
+  cadenceText,
+  checkEveryMinutes,
+  floorToMinute,
+  MIN_INTERVAL_DEFAULT,
+  missedSlots,
+  nextScheduled,
+  scheduleText,
+  type MissedSlots,
+} from './schedule.ts';
 
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
 /** 调度循环的检查间隔;条目是分钟级粒度,15 秒内必然查到,不值得多一个旋钮。 */
 const CHECK_MS = 15_000;
 const MAX_PROMPT_CHARS = 2000;
+/** 晚到一分钟以上才算「补投」:正常到点是这一分钟内对表时投出,只有错过一拍才会迟到这么久。 */
+const CATCHUP_MS = 60_000;
 
 export interface AgendaWorldOptions {
   /** `worlds.agenda` 的活引用。 */
@@ -23,19 +36,15 @@ export interface AgendaWorldOptions {
   now?: () => Date;
 }
 
-const parsedCache = new Map<string, ParsedCron | Error>();
-
-function parsedOf(expr: string): ParsedCron | Error {
-  let p = parsedCache.get(expr);
-  if (p === undefined) {
-    try {
-      p = parseCron(expr);
-    } catch (err) {
-      p = err instanceof Error ? err : new Error(String(err));
-    }
-    parsedCache.set(expr, p);
-  }
-  return p;
+/** 这一次对表要投的一条:条目本体 + 它该响的那一拍 + 错过几拍。 */
+interface DueItem {
+  entry: AgendaEntry;
+  /** 该响的时刻(补投时是过去那一拍)。 */
+  scheduled: Date;
+  /** 锚点之后、现在之前本该响几拍;1 表示只有这一拍(正常到点)。 */
+  missed: MissedSlots;
+  /** 晚出一分钟以上:不是刚到点,是补投。 */
+  catchUp: boolean;
 }
 
 /** 增/改的核心结果:error 是给人看的一句话,工具加「未添加/未改」前缀,面板原样显示。 */
@@ -45,9 +54,10 @@ type CoreErr = { ok: false; notFound?: boolean; error: string };
 /** 面板 list 的一行:条目本体加上算好的展示字段,前端不做 cron 计算。 */
 interface EntryView {
   id: string;
-  kind: 'cron' | 'once';
+  kind: 'cron' | 'once' | 'every';
   cron?: string;
   at?: string;
+  everyMinutes?: number;
   prompt: string;
   owner: 'deployer' | 'agent';
   ownerLabel: string;
@@ -79,6 +89,16 @@ export class AgendaWorld implements World {
     this.opts.persist({ entries: next });
   }
 
+  /** 间隔下限:配置组没给(旧部署)就用缺省。 */
+  private minInterval(): number {
+    return this.opts.cfg.minIntervalMinutes ?? MIN_INTERVAL_DEFAULT;
+  }
+
+  /** 「从现在起算」的那一刻:整分。改节律、重新启用、新建条目都落它。 */
+  private anchorStamp(now: Date): string {
+    return nowIso(this.opts.timezone, floorToMinute(now));
+  }
+
   /** 只报值;前缀文本一律来自 ENV_PROMPT.md 模板。 */
   envPromptVars(): Record<string, string> {
     const all = this.entries();
@@ -86,6 +106,7 @@ export class AgendaWorld implements World {
     return {
       'agenda.summary': all.length === 0 ? '是空的' : `共 ${all.length} 条${off > 0 ? `(${off} 条停用)` : ''}`,
       'agenda.maxEntries': String(this.opts.cfg.maxEntries),
+      'agenda.minInterval': String(this.minInterval()),
     };
   }
 
@@ -114,6 +135,7 @@ export class AgendaWorld implements World {
           vars: [
             { name: 'agenda.summary', description: '日程表现状一句话。' },
             { name: 'agenda.maxEntries', description: '条目上限,此刻的值。' },
+            { name: 'agenda.minInterval', description: '循环间隔的下限(分钟),此刻的值。' },
           ],
         },
       ],
@@ -130,8 +152,11 @@ export class AgendaWorld implements World {
       senderKey: this.id,
       text: `日程表已挂载:共 ${this.entries().length} 条,agenda_list / agenda_add / agenda_edit / agenda_remove 可用。`,
     });
-    // 启动那一刻就是「当前分钟」:进程关着时到点的拍子天然不会补投。
-    this.lastBucket = this.bucket(this.opts.now?.() ?? new Date());
+    // 起来先对一次表:World 停着或进程关着时错过的那几拍,在这一批里补投一次(与挂载报备同一批,
+    // 不多开一轮)。之后每分钟一查由 tick 接着对。
+    const now = this.opts.now?.() ?? new Date();
+    await this.fireDue(now);
+    this.lastBucket = this.bucket(now);
     this.timer = setInterval(() => void this.tick(), CHECK_MS);
     this.timer.unref?.();
   }
@@ -153,25 +178,7 @@ export class AgendaWorld implements World {
     this.lastBucket = bucket;
     this.checking = true;
     try {
-      const due = this.entries().filter((e) => e.enabled && this.isDue(e, now));
-      if (due.length === 0) return;
-      let cronTouched = false;
-      for (const e of due) {
-        try {
-          await this.host!.pushEvent(this.dueEvent(e), { trigger: 'flush' });
-        } catch (err) {
-          this.host!.log.warn(`agenda.due 投递失败(${e.id}):${err instanceof Error ? err.message : String(err)}`);
-          continue;
-        }
-        if (e.kind === 'once') {
-          this.commit(this.entries().filter((x) => x.id !== e.id));
-        } else {
-          e.lastFiredAt = nowIso(this.opts.timezone, now);
-          cronTouched = true;
-        }
-      }
-      // cron 条目只记 lastFiredAt:同一次提交收账,不逐条写盘。
-      if (cronTouched) this.commit([...this.entries()]);
+      await this.fireDue(now);
     } finally {
       this.checking = false;
     }
@@ -181,24 +188,75 @@ export class AgendaWorld implements World {
     return Math.floor(d.getTime() / 60_000);
   }
 
-  private isDue(e: AgendaEntry, now: Date): boolean {
-    if (e.kind === 'once') {
-      return e.at !== undefined && e.at === formatAt(now);
+  /**
+   * 把此刻该响的投出去;start() 与 tick() 共用,该不该响的规则只此一份。
+   * 投递失败的条目不动它的锚点,下一拍接着试。
+   */
+  private async fireDue(now: Date): Promise<void> {
+    const due: DueItem[] = [];
+    for (const e of this.entries()) {
+      if (!e.enabled) continue;
+      const item = this.dueItem(e, now);
+      if (item !== null) due.push(item);
     }
-    if (e.cron === undefined) return false;
-    const p = parsedOf(e.cron);
-    return !(p instanceof Error) && cronMatches(p, now);
+    if (due.length === 0) return;
+    let touched = false;
+    for (const item of due) {
+      try {
+        await this.host!.pushEvent(this.dueEvent(item), { trigger: 'flush' });
+      } catch (err) {
+        this.host!.log.warn(`agenda.due 投递失败(${item.entry.id}):${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+      if (item.entry.kind === 'once') {
+        this.commit(this.entries().filter((x) => x.id !== item.entry.id));
+      } else {
+        // 锚点挪到「现在这一分钟」:补投时也绝不能挪回那一拍——挪回去下一拍还在过去,会连炸。
+        item.entry.anchorAt = this.anchorStamp(now);
+        item.entry.lastFiredAt = nowIso(this.opts.timezone, now);
+        touched = true;
+      }
+    }
+    // 周期条目只记锚点:同一次提交收账,不逐条写盘。
+    if (touched) this.commit([...this.entries()]);
   }
 
-  private dueEvent(e: AgendaEntry): Parameters<WorldHost['pushEvent']>[0] {
+  /**
+   * 这一条此刻该不该响。一次性条目只在正好那一分钟响(过期即跳过,不补);
+   * 周期条目看从锚点算的下一拍是否已到——已到就响,晚出一分钟以上算补投。
+   */
+  private dueItem(e: AgendaEntry, now: Date): DueItem | null {
+    if (e.kind === 'once') {
+      if (e.at === undefined || e.at !== formatAt(now)) return null;
+      return { entry: e, scheduled: floorToMinute(now), missed: { count: 1, capped: false }, catchUp: false };
+    }
+    const anchor = anchorOf(e);
+    if (anchor === null) return null;
+    const scheduled = nextScheduled(e, anchor);
+    if (scheduled === null || scheduled.getTime() > now.getTime()) return null;
+    return {
+      entry: e,
+      scheduled,
+      missed: missedSlots(e, anchor, now),
+      catchUp: now.getTime() - scheduled.getTime() >= CATCHUP_MS,
+    };
+  }
+
+  private dueEvent(item: DueItem): Parameters<WorldHost['pushEvent']>[0] {
+    const e = item.entry;
     const who = e.owner === 'deployer' ? '开发者' : this.opts.botName;
+    const lines = [e.prompt, `—— 条目 ${e.id} · ${scheduleText(e)} · 由 ${who} 添加`];
+    if (item.catchUp) {
+      const n = item.missed.capped ? `${item.missed.count} 拍以上` : `${item.missed.count} 拍`;
+      lines.push(`—— 补投:原定 ${formatAt(item.scheduled)},错过了 ${n}`);
+    }
     return {
       type: 'agenda.due',
       ts: nowIso(this.opts.timezone),
       source: this.id,
       origin: 'internal',
       senderKey: this.id,
-      text: `${e.prompt}\n—— 条目 ${e.id} · ${scheduleDesc(e)} · 由 ${who} 添加`,
+      text: lines.join('\n'),
     };
   }
 
@@ -210,6 +268,7 @@ export class AgendaWorld implements World {
     prompt: string;
     cron?: string;
     at?: string;
+    everyMinutes?: unknown;
     owner: AgendaEntry['owner'];
   }): CoreOk<AgendaEntry> | CoreErr {
     const prompt = input.prompt.trim();
@@ -226,12 +285,16 @@ export class AgendaWorld implements World {
     }
     const hasCron = input.cron !== undefined && input.cron !== '';
     const hasAt = input.at !== undefined && input.at !== '';
-    if (hasCron === hasAt) {
+    const hasEvery = input.everyMinutes !== undefined && input.everyMinutes !== '';
+    const forms = [hasCron, hasAt, hasEvery].filter(Boolean).length;
+    if (forms !== 1) {
       return {
         ok: false,
-        error: 'cron 与 at 必须二选一——周期性的写 cron(如 30 21 * * *),一次性的写 at(如 2026-09-19T21:30)。',
+        error:
+          '节律三选一:everyMinutes(每隔 N 分钟,如 40)、cron(如 30 21 * * *)、at(如 2026-09-19T21:30)。',
       };
     }
+    const now = this.opts.now?.() ?? new Date();
     const common = {
       id: `ag-${randomBytes(3).toString('hex')}`,
       prompt,
@@ -242,17 +305,29 @@ export class AgendaWorld implements World {
     if (hasCron) {
       try {
         const p = parseCron(input.cron!.trim());
-        const entry: AgendaEntry = { kind: 'cron', cron: p.normalized, ...common };
+        const entry: AgendaEntry = { kind: 'cron', cron: p.normalized, anchorAt: this.anchorStamp(now), ...common };
         this.commit([...all, entry]);
         return { ok: true, entry };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     }
+    if (hasEvery) {
+      const checked = checkEveryMinutes(input.everyMinutes, this.minInterval());
+      if (!checked.ok) return { ok: false, error: checked.error };
+      const entry: AgendaEntry = {
+        kind: 'every',
+        everyMinutes: checked.minutes,
+        anchorAt: this.anchorStamp(now),
+        ...common,
+      };
+      this.commit([...all, entry]);
+      return { ok: true, entry };
+    }
     try {
       const at = parseAt(input.at!.trim());
-      if (at.getTime() <= (this.opts.now?.() ?? new Date()).getTime()) {
-        return { ok: false, error: 'at 是过去的时间——错过不补,要一次性提醒就给未来的时刻。' };
+      if (at.getTime() <= now.getTime()) {
+        return { ok: false, error: 'at 是过去的时间——一次性提醒过期不补,要给未来的时刻。' };
       }
       const entry: AgendaEntry = { kind: 'once', at: formatAt(at), ...common };
       this.commit([...all, entry]);
@@ -264,13 +339,17 @@ export class AgendaWorld implements World {
 
   private editCore(
     id: string,
-    patch: { prompt?: string; cron?: string; at?: string; enabled?: boolean },
+    patch: { prompt?: string; cron?: string; at?: string; everyMinutes?: unknown; enabled?: boolean },
   ): CoreOk<AgendaEntry> | CoreErr {
     const e = this.entries().find((x) => x.id === id);
     if (!e) return { ok: false, notFound: true, error: `没有 ${id || '(空 id)'} 这条;用 agenda_list 看现有条目。` };
     const hasCron = patch.cron !== undefined && patch.cron !== '';
     const hasAt = patch.at !== undefined && patch.at !== '';
-    if (hasCron && hasAt) return { ok: false, error: 'cron 与 at 只能给一个。' };
+    const hasEvery = patch.everyMinutes !== undefined && patch.everyMinutes !== '';
+    if ([hasCron, hasAt, hasEvery].filter(Boolean).length > 1) {
+      return { ok: false, error: '节律一次只改一样:everyMinutes、cron、at 三选一。' };
+    }
+    const now = this.opts.now?.() ?? new Date();
     const next: AgendaEntry = { ...e };
     if (patch.prompt !== undefined) {
       const prompt = patch.prompt.trim();
@@ -286,23 +365,37 @@ export class AgendaWorld implements World {
         next.kind = 'cron';
         next.cron = p.normalized;
         delete next.at;
+        delete next.everyMinutes;
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
+    } else if (hasEvery) {
+      const checked = checkEveryMinutes(patch.everyMinutes, this.minInterval());
+      if (!checked.ok) return { ok: false, error: checked.error };
+      next.kind = 'every';
+      next.everyMinutes = checked.minutes;
+      delete next.cron;
+      delete next.at;
     } else if (hasAt) {
       try {
         const at = parseAt(patch.at!.trim());
-        if (at.getTime() <= (this.opts.now?.() ?? new Date()).getTime()) {
-          return { ok: false, error: 'at 是过去的时间——错过不补,要一次性提醒就给未来的时刻。' };
+        if (at.getTime() <= now.getTime()) {
+          return { ok: false, error: 'at 是过去的时间——一次性提醒过期不补,要给未来的时刻。' };
         }
         next.kind = 'once';
         next.at = formatAt(at);
         delete next.cron;
+        delete next.everyMinutes;
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     }
-    if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled;
+    // 改了节律、或把停用的重新启用,都从现在起算:锚点挪到这一分钟,不回头补那一拍。
+    if ((hasCron || hasAt || hasEvery) && next.kind !== 'once') next.anchorAt = this.anchorStamp(now);
+    if (typeof patch.enabled === 'boolean') {
+      if (patch.enabled && !e.enabled && next.kind !== 'once') next.anchorAt = this.anchorStamp(now);
+      next.enabled = patch.enabled;
+    }
     this.commit(this.entries().map((x) => (x.id === id ? next : x)));
     return { ok: true, entry: next };
   }
@@ -326,13 +419,14 @@ export class AgendaWorld implements World {
       kind: e.kind,
       cron: e.cron,
       at: e.at,
+      everyMinutes: e.everyMinutes,
       prompt: e.prompt,
       owner: e.owner,
       ownerLabel: e.owner === 'deployer' ? '开发者' : this.opts.botName,
       enabled: e.enabled,
       createdAt: e.createdAt,
       lastFiredAt: e.lastFiredAt,
-      schedule: this.scheduleText(e),
+      schedule: scheduleText(e, true),
       next: expired ? '已过期(错过不投)' : this.nextText(e),
     };
   }
@@ -344,6 +438,11 @@ export class AgendaWorld implements World {
     const str = (v: unknown): string => (typeof v === 'string' ? v : '');
     const optStr = (v: unknown): string | undefined =>
       typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+    /** 面板的数字输入:空框当没填,其余原样交给核心校验(与 cron/at 的 optStr 同一套口径)。 */
+    const optNum = (v: unknown): string | number | undefined => {
+      if (typeof v === 'number') return v;
+      return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+    };
     switch (method) {
       case 'list':
         return { entries: this.entries().map((e) => this.entryView(e)) };
@@ -352,6 +451,7 @@ export class AgendaWorld implements World {
           prompt: str(payload.prompt),
           cron: optStr(payload.cron),
           at: optStr(payload.at),
+          everyMinutes: optNum(payload.everyMinutes),
           owner: 'deployer',
         });
         return res.ok ? { ok: true, message: `已加 ${res.entry.id}`, entry: this.entryView(res.entry) } : { ok: false, error: res.error };
@@ -361,6 +461,7 @@ export class AgendaWorld implements World {
           prompt: payload.prompt === undefined ? undefined : str(payload.prompt),
           cron: optStr(payload.cron),
           at: optStr(payload.at),
+          everyMinutes: optNum(payload.everyMinutes),
           enabled: typeof payload.enabled === 'boolean' ? payload.enabled : undefined,
         });
         return res.ok
@@ -380,23 +481,26 @@ export class AgendaWorld implements World {
   // 展示
   // ---------------------------------------------------------------------------
 
-  private scheduleText(e: AgendaEntry): string {
-    if (e.kind === 'once') return `一次性 ${e.at ?? '?'}`;
-    const p = parsedOf(e.cron ?? '');
-    return p instanceof Error ? `节律看不懂(${(p as Error).message})` : `节律 ${p.normalized}`;
-  }
-
+  /** 下次触发:周期条目按锚点算;已经过点的说明它欠着一拍(起不来就是补投,起来了就是这一拍)。 */
   private nextText(e: AgendaEntry): string {
+    const now = this.opts.now?.() ?? new Date();
     if (e.kind === 'once') {
       if (!e.at) return '';
       const at = parseAtQuiet(e.at);
       if (!at) return '';
-      return at.getTime() <= (this.opts.now?.() ?? new Date()).getTime() ? '已过期' : `将于 ${e.at}`;
+      return at.getTime() <= now.getTime() ? '已过期' : `将于 ${e.at}`;
     }
-    const p = parsedOf(e.cron ?? '');
-    if (p instanceof Error) return '';
-    const next = nextFire(p, this.opts.now?.() ?? new Date());
-    return next ? `下次 ${formatAt(next)}` : '没有下次(表达式在可见的未来永不命中)';
+    const anchor = anchorOf(e);
+    if (anchor === null) return '';
+    const next = nextScheduled(e, anchor);
+    if (next === null) return '没有下次(表达式在可见的未来永不命中)';
+    return next.getTime() <= now.getTime() ? `已到点(原定 ${formatAt(next)})` : `下次 ${formatAt(next)}`;
+  }
+
+  /** 增/改之后念给她听的一句话:节律 · 下次 · 循环条目的一天几次 · 提示词。 */
+  private summarize(e: AgendaEntry): string {
+    const cadence = e.kind === 'every' && e.everyMinutes !== undefined ? ` · ${cadenceText(e.everyMinutes)}` : '';
+    return `${scheduleText(e)} · ${this.nextText(e)}${cadence} · 「${e.prompt}」`;
   }
 
   // ---------------------------------------------------------------------------
@@ -407,8 +511,9 @@ export class AgendaWorld implements World {
     return {
       name: 'agenda_list',
       description:
-        'List every entry in the shared schedule: id, schedule, prompt, who asked for it, enabled flag, ' +
-        'and next fire time (cron) or expiry note (one-shot). An empty table returns usage hints.',
+        'List every entry in the shared schedule: id, schedule (cron expr, repeat interval, or one-shot time), ' +
+        'prompt, who asked for it, enabled flag, and next fire time (or expiry note for a one-shot). ' +
+        'An empty table returns usage hints.',
       tags: ['read'],
       parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
       handler: async () => this.renderList(),
@@ -418,12 +523,15 @@ export class AgendaWorld implements World {
   private renderList(): string {
     const all = this.entries();
     if (all.length === 0) {
-      return '日程表是空的。用 agenda_add 加条目:prompt 必填,cron(如 30 21 * * *)与 at(如 2026-09-19T21:30)二选一。';
+      return (
+        '日程表是空的。用 agenda_add 加条目:prompt 必填,节律三选一——everyMinutes(每隔 N 分钟,如 40)、' +
+        'cron(如 30 21 * * *)、at(如 2026-09-19T21:30)。'
+      );
     }
     const lines = all.map((e, i) => {
       const state = e.enabled ? '启用' : '停用';
       const who = e.owner === 'deployer' ? '开发者' : this.opts.botName;
-      return `${i + 1}. ${e.id} [${state}] ${this.scheduleText(e)} · ${this.nextText(e)} · 由 ${who} 添加\n   「${e.prompt}」`;
+      return `${i + 1}. ${e.id} [${state}] ${scheduleText(e)} · ${this.nextText(e)} · 由 ${who} 添加\n   「${e.prompt}」`;
     });
     const cap = this.opts.cfg.maxEntries;
     return `共 ${all.length} 条(上限 ${cap}):\n${lines.join('\n')}`;
@@ -433,7 +541,8 @@ export class AgendaWorld implements World {
     return {
       name: 'agenda_add',
       description:
-        'Add a schedule entry. Supply exactly one of "cron" (5-field expr: minute hour day-of-month month day-of-week, ' +
+        'Add a schedule entry. Supply exactly one of "everyMinutes" (repeat every N minutes, e.g. 40; counted from ' +
+        'the previous fire, not aligned to the clock), "cron" (5-field expr: minute hour day-of-month month day-of-week, ' +
         'e.g. "30 21 * * *" = daily 21:30) or "at" ("YYYY-MM-DDTHH:mm" local time; fires once, then the entry is removed). ' +
         '"prompt" is the verbatim instruction delivered to you when it fires — make it self-contained. ' +
         'Set requestedBy to "deployer" when the developer asked for this entry (default "agent").',
@@ -443,8 +552,17 @@ export class AgendaWorld implements World {
         additionalProperties: false,
         properties: {
           prompt: { type: 'string', description: 'Verbatim instruction delivered at fire time (max 2000 chars).' },
-          cron: { type: 'string', description: '5-field cron expr, mutually exclusive with at.' },
-          at: { type: 'string', description: 'One-shot local time YYYY-MM-DDTHH:mm, mutually exclusive with cron.' },
+          everyMinutes: {
+            type: 'integer',
+            description:
+              'Repeat interval in minutes (40 = every 40 minutes, 120 = every 2 hours); a minimum applies. ' +
+              'Mutually exclusive with cron and at.',
+          },
+          cron: { type: 'string', description: '5-field cron expr, mutually exclusive with everyMinutes and at.' },
+          at: {
+            type: 'string',
+            description: 'One-shot local time YYYY-MM-DDTHH:mm, mutually exclusive with everyMinutes and cron.',
+          },
           requestedBy: { type: 'string', enum: ['deployer', 'agent'], description: 'Who asked for this entry.' },
         },
         required: ['prompt'],
@@ -454,10 +572,11 @@ export class AgendaWorld implements World {
           prompt: typeof args.prompt === 'string' ? args.prompt : '',
           cron: typeof args.cron === 'string' && args.cron.trim() !== '' ? args.cron.trim() : undefined,
           at: typeof args.at === 'string' && args.at.trim() !== '' ? args.at.trim() : undefined,
+          everyMinutes: args.everyMinutes,
           owner: args.requestedBy === 'deployer' ? 'deployer' : 'agent',
         });
         if (!res.ok) return `未添加:${res.error}`;
-        return `已加:${res.entry.id} · ${this.scheduleText(res.entry)} · ${this.nextText(res.entry)} · 「${res.entry.prompt}」`;
+        return `已加:${res.entry.id} · ${this.summarize(res.entry)}`;
       },
     };
   }
@@ -466,8 +585,9 @@ export class AgendaWorld implements World {
     return {
       name: 'agenda_edit',
       description:
-        'Edit an entry by id: change its prompt, reschedule it (supply exactly one of cron or at; that switches its kind), ' +
-        'or toggle enabled. Any entry can be edited, including ones the deployer added.',
+        'Edit an entry by id: change its prompt, reschedule it (supply exactly one of everyMinutes, cron or at; that ' +
+        'switches its kind), or toggle enabled. A schedule change — or switching a disabled entry back on — restarts ' +
+        'the countdown from now. Any entry can be edited, including ones the deployer added.',
       tags: ['write'],
       parameters: {
         type: 'object',
@@ -475,8 +595,14 @@ export class AgendaWorld implements World {
         properties: {
           id: { type: 'string', description: 'Entry id from agenda_list, e.g. ag-3f9c2a.' },
           prompt: { type: 'string', description: 'New verbatim instruction (max 2000 chars).' },
-          cron: { type: 'string', description: 'New 5-field cron expr; mutually exclusive with at.' },
-          at: { type: 'string', description: 'New one-shot local time; mutually exclusive with cron.' },
+          everyMinutes: {
+            type: 'integer',
+            description:
+              'New repeat interval in minutes (40 = every 40 minutes); mutually exclusive with cron and at. ' +
+              'Use this to change how often a repeating alarm fires.',
+          },
+          cron: { type: 'string', description: 'New 5-field cron expr; mutually exclusive with everyMinutes and at.' },
+          at: { type: 'string', description: 'New one-shot local time; mutually exclusive with everyMinutes and cron.' },
           enabled: { type: 'boolean', description: 'Enable or disable without deleting.' },
         },
         required: ['id'],
@@ -486,10 +612,11 @@ export class AgendaWorld implements World {
           prompt: typeof args.prompt === 'string' ? args.prompt : undefined,
           cron: typeof args.cron === 'string' && args.cron.trim() !== '' ? args.cron.trim() : undefined,
           at: typeof args.at === 'string' && args.at.trim() !== '' ? args.at.trim() : undefined,
+          everyMinutes: args.everyMinutes,
           enabled: typeof args.enabled === 'boolean' ? args.enabled : undefined,
         });
         if (!res.ok) return res.notFound ? res.error : `未改:${res.error}`;
-        return `已改:${res.entry.id} · ${this.scheduleText(res.entry)} · ${this.nextText(res.entry)} · 「${res.entry.prompt}」`;
+        return `已改:${res.entry.id} · ${this.summarize(res.entry)}`;
       },
     };
   }
@@ -516,12 +643,6 @@ export class AgendaWorld implements World {
       },
     };
   }
-}
-
-function scheduleDesc(e: AgendaEntry): string {
-  if (e.kind === 'once') return `一次性 ${e.at ?? '?'}`;
-  const p = parsedOf(e.cron ?? '');
-  return p instanceof Error ? `节律 ${e.cron}(看不懂)` : `节律 ${p.normalized}`;
 }
 
 function parseAtQuiet(raw: string): Date | null {
