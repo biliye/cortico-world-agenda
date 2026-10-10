@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-agenda",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Cortico World: a shared schedule that pushes prompt events at their due minute, waking the bot to act",
+  "description": "Cortico World: a shared schedule that pushes prompt events at their due minute, plus a shared notepad delivered in full whenever the World starts",
   "license": "MIT",
   "keywords": [
     "cortico-world",

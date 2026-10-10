@@ -26,19 +26,40 @@ export interface AgendaEntry {
   lastFiredAt?: string;
 }
 
+/** 一张纸条(便签那一通道)。 */
+export interface NoteEntry {
+  /** nt- 加 6 位十六进制。 */
+  id: string;
+  /** 纸条正文,原样保留换行。 */
+  text: string;
+  /** 谁写的:工具写的一律记 agent,控制台设置页写的一律记 deployer。事实标注,不是权限。 */
+  author: 'deployer' | 'agent';
+  /** 写下这一刻;改过之后仍是第一次写下的时刻。 */
+  createdAt: string;
+  /** 最后一次改动的时刻;没改过就没有。 */
+  updatedAt?: string;
+}
+
+/** 便签张数的缺省值。 */
+export const DEFAULT_MAX_NOTES = 50;
+
 /**
- * config.json 的 worlds.agenda 段,默认禁用;bot 或部署可启用。
+ * config.json 的 worlds.agenda 段,默认禁用;bot 或部署可启用。两张清单都在这一段里:
+ * entries 是日程(到点响),notes 是便签(每次挂载整册投给她)。
  *
- * entries 的增删改走 ctx.persist()(契约内的官方写回,备份+换名),控制台配置组
- * 只声明标量旋钮——配置组表单装不下「一列条目」,详情页面板是二期的事。
+ * 两张清单的增删改走 ctx.persist()(契约内的官方写回,备份+换名),控制台配置组只声明标量旋钮——
+ * 配置组表单装不下「一列条目」,清单本身在详情页的两个面板页签里看与改。
  */
 export interface AgendaConfigSection {
   enabled: boolean;
   entries: AgendaEntry[];
+  notes: NoteEntry[];
   /** 条目数上限;加满了再 add 会被拒。防失控的机械护栏,不是防她。 */
   maxEntries: number;
   /** 循环条目间隔的下限(分钟);每响一次是一轮模型调用,给个门槛,热生效。 */
   minIntervalMinutes: number;
+  /** 纸条张数上限;加满了再 add 会被拒。防失控的机械护栏,不是防她。 */
+  maxNotes: number;
 }
 
 /** World 配置的 JSON Schema 声明。 */
@@ -59,6 +80,13 @@ export const AGENDA_CONFIG_GROUP: ConfigGroup = {
         type: 'integer',
         title: '循环间隔下限(分钟)',
         description: '「每隔 N 分钟」的条目最小能写多少;每响一次就是一轮模型调用。默认 5。',
+        'x-hot': true,
+      },
+      'worlds.agenda.maxNotes': {
+        type: 'integer',
+        title: '纸条上限',
+        description: '便签最多几张纸条,加满了 agenda_note_add 会被拒。默认 50。',
+        minimum: 1,
         'x-hot': true,
       },
     },

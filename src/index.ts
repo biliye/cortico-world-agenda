@@ -3,4 +3,5 @@ import { AGENDA } from './definition.ts';
 
 export default AGENDA;
 export { AGENDA };
-export type { AgendaConfigSection, AgendaEntry } from './config.ts';
+export { AGENDA_CONFIG_GROUP, DEFAULT_MAX_NOTES } from './config.ts';
+export type { AgendaConfigSection, AgendaEntry, NoteEntry } from './config.ts';

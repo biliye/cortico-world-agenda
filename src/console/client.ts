@@ -1,8 +1,8 @@
 /**
- * Agenda World 的浏览器扩展 —— 「日程条目」面板。
+ * Agenda World 的浏览器扩展 —— 两个面板页签:「日程条目」与「便签」。
  *
  * 与外界的依赖只有一条:`client-panel.ts` 里的**类型**。数据一律走 `ctx.invoke`
- * (增删改查的服务端实现在 world.ts 的 invokePanel),DOM 一律用 `ctx.ui` 的原语,
+ * (增删改查与投递的服务端实现在 world.ts 的 invokePanel),DOM 一律用 `ctx.ui` 的原语,
  * 定时一律走 `ctx.interval`——所以没有任何自定义 CSS,面板跟着控制台的浅深主题走。
  */
 
@@ -27,8 +27,28 @@ interface EntryView {
   next: string;
 }
 
+/** 服务端 noteView 的形状。 */
+interface NoteView {
+  id: string;
+  text: string;
+  author: 'deployer' | 'agent';
+  authorLabel: string;
+  /** MM-DD HH:mm。 */
+  writtenAt: string;
+  /** 改过的时刻;没改过就是空串。 */
+  editedAt: string;
+}
+
 interface ListResult {
   entries: EntryView[];
+}
+
+interface NoteListResult {
+  notes: NoteView[];
+  maxNotes: number;
+  maxChars: number;
+  /** World 没在跑就投不了,「现在投给她」据此置灰。 */
+  deliverable: boolean;
 }
 
 interface MutResult {
@@ -40,6 +60,7 @@ interface MutResult {
 export default {
   panels: {
     entries: { mount: (ctx) => void mountEntries(ctx) },
+    notes: { mount: (ctx) => void mountNotes(ctx) },
   },
 } satisfies ConsoleClientBundle;
 
@@ -354,6 +375,187 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
     msgline('', false);
   }
 
+
+  function msgline(text: string, bad: boolean): void {
+    msg.textContent = text;
+    msg.classList.toggle('bad', bad);
+  }
+
+  function toast(text: string): void {
+    ui.toast(text, 'ok');
+  }
+}
+
+async function mountNotes(ctx: ConsolePanelContext): Promise<void> {
+  const ui = ctx.ui;
+  let editingId: string | null = null;
+  let maxChars = 2000;
+
+  // --- 纸条表 ---
+
+  const sheet = ui.sheet({
+    title: '便签',
+    desc: '你与她共写的小纸条。她在聊天里写、你在这儿写,都是同一册;每次这个 World 启动,整册会自动投给她一次。',
+  });
+  ctx.root.append(sheet.el);
+
+  const msg = ui.msgline();
+  const rowbar = ui.rowbar();
+  const table: ConsoleTable = ui.table({
+    head: ['谁写的', '正文', '写下', '改过', '操作'],
+    maxHeight: 'calc(100vh - 430px)',
+  });
+  const deliverBtn = ui.button('现在投给她', {
+    variant: 'primary',
+    size: 'sm',
+    onClick: () => void deliver(),
+  });
+  rowbar.append(
+    ui.button('写一张', {
+      size: 'sm',
+      onClick: () => {
+        resetForm();
+        editorArea.focus();
+      },
+    }),
+    deliverBtn,
+    ui.button('刷新', { size: 'sm', onClick: () => void refresh() }),
+  );
+  sheet.body.append(rowbar, msg, table.el);
+
+  // --- 写 / 改 ---
+
+  const editor = ui.sheet({
+    title: '写一张 / 改一张',
+    desc: '在这儿写下的纸条记在你名下;她写的也在同一册里,你能改也能删。',
+  });
+  ctx.root.append(editor.el);
+
+  const editorArea = ui.textarea({ rows: 5, placeholder: '纸条正文;换行会原样留在上面。' });
+  const saveBtn = ui.button('写下', { variant: 'primary', size: 'sm', onClick: () => void save() });
+  const cancelBtn = ui.button('取消编辑', { size: 'sm', onClick: () => resetForm() });
+  const editorRow = ui.rowbar();
+  editorRow.append(saveBtn, cancelBtn);
+  editor.body.append(editorArea, editorRow);
+  cancelBtn.style.display = 'none';
+
+  void refresh();
+  ctx.interval(() => void refresh(), 15_000);
+
+  // --- 行为 ---
+
+  async function save(): Promise<void> {
+    const text = editorArea.value.trim();
+    if (text.length === 0) {
+      msgline('纸条不能是空的。', true);
+      return;
+    }
+    if (text.length > maxChars) {
+      msgline(`纸条超过 ${maxChars} 字(现在 ${text.length})。`, true);
+      return;
+    }
+    const busy = ui.busy('提交中');
+    try {
+      const res = editingId
+        ? await ctx.invoke<MutResult>('edit', [{ id: editingId, text }])
+        : await ctx.invoke<MutResult>('add', [{ text }]);
+      if (!res.ok) {
+        msgline(res.error ?? '提交被拒。', true);
+        return;
+      }
+      toast(res.message ?? '已保存');
+      resetForm();
+      await refresh();
+    } catch (err) {
+      msgline(errText(err), true);
+    } finally {
+      busy.dispose();
+    }
+  }
+
+  async function del(n: NoteView): Promise<void> {
+    const ok = await ui.confirm({
+      title: `删掉 ${n.id}?`,
+      body: n.text.length > 80 ? `${n.text.slice(0, 80)}…` : n.text,
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const res = await ctx.invoke<MutResult>('remove', [{ id: n.id }]);
+      if (!res.ok) {
+        msgline(res.error ?? '提交被拒。', true);
+        return;
+      }
+      if (editingId === n.id) resetForm();
+      toast(res.message ?? '已删');
+      await refresh();
+    } catch (err) {
+      msgline(errText(err), true);
+    }
+  }
+
+  async function deliver(): Promise<void> {
+    try {
+      const res = await ctx.invoke<MutResult>('deliver');
+      if (!res.ok) {
+        msgline(res.error ?? '投递被拒。', true);
+        return;
+      }
+      toast(res.message ?? '已投给她');
+    } catch (err) {
+      msgline(errText(err), true);
+    }
+  }
+
+  async function refresh(): Promise<void> {
+    try {
+      const res = await ctx.invoke<NoteListResult>('list');
+      maxChars = res.maxChars;
+      table.clear();
+      deliverBtn.disabled = !res.deliverable;
+      deliverBtn.title = res.deliverable ? '' : '这个 World 没在跑,投不了';
+      if (res.notes.length === 0) {
+        table.clear('便签还是空的——在上面写第一张,或让她在聊天里写。');
+        return;
+      }
+      for (const n of res.notes) renderRow(n);
+    } catch (err) {
+      msgline(errText(err), true);
+    }
+  }
+
+  function renderRow(n: NoteView): void {
+    const ops = ui.h('div', null, null);
+    ops.style.display = 'flex';
+    ops.style.gap = '6px';
+    ops.append(
+      ui.button('编辑', { size: 'sm', onClick: () => fillForm(n) }),
+      ui.button('删除', { size: 'sm', variant: 'danger', onClick: () => void del(n) }),
+    );
+    table.addRow([
+      ui.pill(n.authorLabel, n.author === 'deployer' ? 'plain' : 'on'),
+      { text: n.text, cls: 'txt' },
+      { text: n.writtenAt, cls: 'mono' },
+      { text: n.editedAt || '—', cls: 'mono' },
+      ops,
+    ]);
+  }
+
+  function fillForm(n: NoteView): void {
+    editingId = n.id;
+    editorArea.value = n.text;
+    saveBtn.textContent = '保存修改';
+    cancelBtn.style.display = '';
+    msgline(`正在改 ${n.id}(${n.authorLabel}写于 ${n.writtenAt});改完点「保存修改」。`, false);
+  }
+
+  function resetForm(): void {
+    editingId = null;
+    editorArea.value = '';
+    saveBtn.textContent = '写下';
+    cancelBtn.style.display = 'none';
+    msgline('', false);
+  }
 
   function msgline(text: string, bad: boolean): void {
     msg.textContent = text;
