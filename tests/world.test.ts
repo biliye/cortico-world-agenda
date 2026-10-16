@@ -65,7 +65,7 @@ function harness(
   };
   /** 面板的数据面。 */
   const panel = <Res,>(panelId: string, method: string, payload: Record<string, unknown> = {}): Promise<Res> =>
-    world.console().invoke!(panelId, method, [payload]) as Promise<Res>;
+    world.webUi().invoke!(panelId, method, [payload]) as Promise<Res>;
   const due = () => host.events.filter((e) => e.type === 'agenda.due');
   const noteStarted = () => host.events.filter((e) => e.type === 'agenda.noteStarted');
   const noteSent = () => host.events.filter((e) => e.type === 'agenda.noteSent');
@@ -496,7 +496,7 @@ describe('声明面', () => {
     expect(Object.keys(AGENDA_CONFIG_GROUP.schema.properties ?? {})).toContain('worlds.agenda.minIntervalMinutes');
     // 便签那一路的变量与配置键也在同一段里
     expect(Object.keys(AGENDA_CONFIG_GROUP.schema.properties ?? {})).toContain('worlds.agenda.maxNotes');
-    expect(h.world.console().promptDocs?.[0]?.key).toBe('worlds.agenda.envPrompt');
+    expect(h.world.webUi().promptDocs?.[0]?.key).toBe('worlds.agenda.envPrompt');
     // 旧部署没有这个键:按缺省 5 分钟判
     h = harness([], 100, undefined as unknown as number);
     expect(h.world.envPromptVars()['agenda.minInterval']).toBe('5');
@@ -507,7 +507,7 @@ describe('声明面', () => {
 describe('面板数据面(invoke)', () => {
   it('声明 entries 面板;增删改查与工具同一套核心,面板加的条目记在开发者名下', async () => {
     h.setClock(T(10, 21, 0, 0));
-    const decl = h.world.console();
+    const decl = h.world.webUi();
     expect(decl.panels?.map((p) => p.id)).toEqual(['entries', 'notes']);
     const invoke = decl.invoke!;
     expect(await invoke('entries', 'add', [{ prompt: '面板加的', cron: '30 21 * * *' }])).toMatchObject({ ok: true });
@@ -529,7 +529,7 @@ describe('面板数据面(invoke)', () => {
 
   it('面板也能加/改循环闹钟:间隔从输入框来的是字符串', async () => {
     h.setClock(T(10, 10, 0, 0));
-    const invoke = h.world.console().invoke!;
+    const invoke = h.world.webUi().invoke!;
     expect(await invoke('entries', 'add', [{ prompt: '看挡位', everyMinutes: '40' }])).toMatchObject({ ok: true });
     expect(h.cfg.entries[0]!.kind).toBe('every');
     expect(h.cfg.entries[0]!.everyMinutes).toBe(40);
@@ -547,7 +547,7 @@ describe('面板数据面(invoke)', () => {
 
   it('非法输入返回 {ok:false, error};未知面板与方法抛错', async () => {
     h.setClock(T(10, 21, 0, 0));
-    const invoke = h.world.console().invoke!;
+    const invoke = h.world.webUi().invoke!;
     expect(await invoke('entries', 'add', [{ prompt: 'x' }])).toMatchObject({ ok: false });
     expect(await invoke('entries', 'add', [{ prompt: 'x', cron: '61 * * * *' }])).toMatchObject({
       ok: false,
@@ -565,7 +565,7 @@ describe('面板数据面(invoke)', () => {
   it('一次性条目过期的,面板 list 标注已过期', async () => {
     h = harness([onceEntry('2030-05-09T08:00', '迟到的')]);
     h.setClock(T(10, 21, 0, 0));
-    const list = (await h.world.console().invoke!('entries', 'list', [])) as {
+    const list = (await h.world.webUi().invoke!('entries', 'list', [])) as {
       entries: Array<{ next: string }>;
     };
     expect(list.entries[0]!.next).toContain('已过期');

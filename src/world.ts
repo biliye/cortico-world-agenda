@@ -9,7 +9,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import type { ToolDef, World, WorldConsoleDecl, WorldHost } from 'cortico/core/types.ts';
+import type { ToolDef, ToolSpec, World, WorldWebUiDecl, WorldHost } from 'cortico/core/types.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import {
   AGENDA_CONFIG_GROUP,
@@ -102,6 +102,163 @@ interface NoteView {
   editedAt: string;
 }
 
+/** 全部工具的静态声明;定义的 describe 与实例的 `tools()` 都取它。 */
+export const AGENDA_LIST_TOOL: ToolSpec = {
+  name: 'agenda_list',
+  description:
+    'List every entry in the shared schedule: id, schedule (cron expr, repeat interval, or one-shot time), ' +
+    'prompt, who asked for it, enabled flag, and next fire time (or expiry note for a one-shot). ' +
+    'An empty table returns usage hints.',
+  tags: ['read'],
+  parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
+};
+
+export const AGENDA_ADD_TOOL: ToolSpec = {
+  name: 'agenda_add',
+  description:
+    'Add a schedule entry. Supply exactly one of "everyMinutes" (repeat every N minutes, e.g. 40; counted from ' +
+    'the previous fire, not aligned to the clock), "cron" (5-field expr: minute hour day-of-month month day-of-week, ' +
+    'e.g. "30 21 * * *" = daily 21:30) or "at" ("YYYY-MM-DDTHH:mm" local time; fires once, then the entry is removed). ' +
+    '"prompt" is the verbatim instruction delivered to you when it fires — make it self-contained. ' +
+    'Set requestedBy to "deployer" when the developer asked for this entry (default "agent").',
+  tags: ['write'],
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      prompt: { type: 'string', description: 'Verbatim instruction delivered at fire time (max 2000 chars).' },
+      everyMinutes: {
+        type: 'integer',
+        description:
+          'Repeat interval in minutes (40 = every 40 minutes, 120 = every 2 hours); a minimum applies. ' +
+          'Mutually exclusive with cron and at.',
+      },
+      cron: { type: 'string', description: '5-field cron expr, mutually exclusive with everyMinutes and at.' },
+      at: {
+        type: 'string',
+        description: 'One-shot local time YYYY-MM-DDTHH:mm, mutually exclusive with everyMinutes and cron.',
+      },
+      requestedBy: { type: 'string', enum: ['deployer', 'agent'], description: 'Who asked for this entry.' },
+    },
+    required: ['prompt'],
+  },
+};
+
+export const AGENDA_EDIT_TOOL: ToolSpec = {
+  name: 'agenda_edit',
+  description:
+    'Edit an entry by id: change its prompt, reschedule it (supply exactly one of everyMinutes, cron or at; that ' +
+    'switches its kind), or toggle enabled. A schedule change — or switching a disabled entry back on — restarts ' +
+    'the countdown from now. Any entry can be edited, including ones the deployer added.',
+  tags: ['write'],
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      id: { type: 'string', description: 'Entry id from agenda_list, e.g. ag-3f9c2a.' },
+      prompt: { type: 'string', description: 'New verbatim instruction (max 2000 chars).' },
+      everyMinutes: {
+        type: 'integer',
+        description:
+          'New repeat interval in minutes (40 = every 40 minutes); mutually exclusive with cron and at. ' +
+          'Use this to change how often a repeating alarm fires.',
+      },
+      cron: { type: 'string', description: 'New 5-field cron expr; mutually exclusive with everyMinutes and at.' },
+      at: { type: 'string', description: 'New one-shot local time; mutually exclusive with everyMinutes and cron.' },
+      enabled: { type: 'boolean', description: 'Enable or disable without deleting.' },
+    },
+    required: ['id'],
+  },
+};
+
+export const AGENDA_REMOVE_TOOL: ToolSpec = {
+  name: 'agenda_remove',
+  description:
+    'Remove an entry by id. Any entry can be removed, including ones the deployer added. ' +
+    'One-shot entries are removed automatically after firing.',
+  tags: ['write'],
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      id: { type: 'string', description: 'Entry id from agenda_list, e.g. ag-3f9c2a.' },
+    },
+    required: ['id'],
+  },
+};
+
+export const AGENDA_NOTE_LIST_TOOL: ToolSpec = {
+  name: 'agenda_note_list',
+  description:
+    'List every note on the shared pad: id, full text, who wrote it, when it was written and last edited. ' +
+    'An empty pad returns usage hints. The whole pad is also delivered as an agenda.noteStarted event ' +
+    'whenever this World starts.',
+  tags: ['read'],
+  parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
+};
+
+export const AGENDA_NOTE_ADD_TOOL: ToolSpec = {
+  name: 'agenda_note_add',
+  description:
+    `Write a new note on the shared pad. "text" is the note body, kept verbatim (max ${MAX_NOTE_CHARS} ` +
+    'chars); it is labelled with your name. The developer writes on the same pad from the console, and his ' +
+    'notes are labelled with his.',
+  tags: ['write'],
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      text: { type: 'string', description: `Note body (max ${MAX_NOTE_CHARS} chars).` },
+    },
+    required: ['text'],
+  },
+};
+
+export const AGENDA_NOTE_EDIT_TOOL: ToolSpec = {
+  name: 'agenda_note_edit',
+  description:
+    'Rewrite the text of one note by id. Any note can be edited, including ones the developer wrote; the ' +
+    'author label stays whoever wrote it first. To drop a note use agenda_note_remove.',
+  tags: ['write'],
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      id: { type: 'string', description: 'Note id from agenda_note_list, e.g. nt-3f9c2a.' },
+      text: { type: 'string', description: `New note body, replacing the old one (max ${MAX_NOTE_CHARS} chars).` },
+    },
+    required: ['id', 'text'],
+  },
+};
+
+export const AGENDA_NOTE_REMOVE_TOOL: ToolSpec = {
+  name: 'agenda_note_remove',
+  description:
+    'Remove one note by id. Any note can be removed, including ones the developer wrote. Removal is final: ' +
+    'the text is gone from the pad.',
+  tags: ['write'],
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      id: { type: 'string', description: 'Note id from agenda_note_list, e.g. nt-3f9c2a.' },
+    },
+    required: ['id'],
+  },
+};
+
+/** describe 用的全量声明;这八个工具无条件进 `tools()`。 */
+export const AGENDA_TOOL_DECLS: ReadonlyArray<ToolSpec> = [
+  AGENDA_LIST_TOOL,
+  AGENDA_ADD_TOOL,
+  AGENDA_EDIT_TOOL,
+  AGENDA_REMOVE_TOOL,
+  AGENDA_NOTE_LIST_TOOL,
+  AGENDA_NOTE_ADD_TOOL,
+  AGENDA_NOTE_EDIT_TOOL,
+  AGENDA_NOTE_REMOVE_TOOL,
+];
+
 export class AgendaWorld implements World {
   readonly id = 'agenda';
 
@@ -182,7 +339,7 @@ export class AgendaWorld implements World {
     ];
   }
 
-  console(): WorldConsoleDecl {
+  webUi(): WorldWebUiDecl {
     return {
       config: [AGENDA_CONFIG_GROUP],
       panels: [
@@ -630,13 +787,7 @@ export class AgendaWorld implements World {
 
   private listTool(): ToolDef {
     return {
-      name: 'agenda_list',
-      description:
-        'List every entry in the shared schedule: id, schedule (cron expr, repeat interval, or one-shot time), ' +
-        'prompt, who asked for it, enabled flag, and next fire time (or expiry note for a one-shot). ' +
-        'An empty table returns usage hints.',
-      tags: ['read'],
-      parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
+      ...AGENDA_LIST_TOOL,
       handler: async () => this.renderList(),
     };
   }
@@ -660,34 +811,7 @@ export class AgendaWorld implements World {
 
   private addTool(): ToolDef {
     return {
-      name: 'agenda_add',
-      description:
-        'Add a schedule entry. Supply exactly one of "everyMinutes" (repeat every N minutes, e.g. 40; counted from ' +
-        'the previous fire, not aligned to the clock), "cron" (5-field expr: minute hour day-of-month month day-of-week, ' +
-        'e.g. "30 21 * * *" = daily 21:30) or "at" ("YYYY-MM-DDTHH:mm" local time; fires once, then the entry is removed). ' +
-        '"prompt" is the verbatim instruction delivered to you when it fires — make it self-contained. ' +
-        'Set requestedBy to "deployer" when the developer asked for this entry (default "agent").',
-      tags: ['write'],
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          prompt: { type: 'string', description: 'Verbatim instruction delivered at fire time (max 2000 chars).' },
-          everyMinutes: {
-            type: 'integer',
-            description:
-              'Repeat interval in minutes (40 = every 40 minutes, 120 = every 2 hours); a minimum applies. ' +
-              'Mutually exclusive with cron and at.',
-          },
-          cron: { type: 'string', description: '5-field cron expr, mutually exclusive with everyMinutes and at.' },
-          at: {
-            type: 'string',
-            description: 'One-shot local time YYYY-MM-DDTHH:mm, mutually exclusive with everyMinutes and cron.',
-          },
-          requestedBy: { type: 'string', enum: ['deployer', 'agent'], description: 'Who asked for this entry.' },
-        },
-        required: ['prompt'],
-      },
+      ...AGENDA_ADD_TOOL,
       handler: async (args) => {
         const res = this.addEntryCore({
           prompt: typeof args.prompt === 'string' ? args.prompt : '',
@@ -704,30 +828,7 @@ export class AgendaWorld implements World {
 
   private editTool(): ToolDef {
     return {
-      name: 'agenda_edit',
-      description:
-        'Edit an entry by id: change its prompt, reschedule it (supply exactly one of everyMinutes, cron or at; that ' +
-        'switches its kind), or toggle enabled. A schedule change — or switching a disabled entry back on — restarts ' +
-        'the countdown from now. Any entry can be edited, including ones the deployer added.',
-      tags: ['write'],
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          id: { type: 'string', description: 'Entry id from agenda_list, e.g. ag-3f9c2a.' },
-          prompt: { type: 'string', description: 'New verbatim instruction (max 2000 chars).' },
-          everyMinutes: {
-            type: 'integer',
-            description:
-              'New repeat interval in minutes (40 = every 40 minutes); mutually exclusive with cron and at. ' +
-              'Use this to change how often a repeating alarm fires.',
-          },
-          cron: { type: 'string', description: 'New 5-field cron expr; mutually exclusive with everyMinutes and at.' },
-          at: { type: 'string', description: 'New one-shot local time; mutually exclusive with everyMinutes and cron.' },
-          enabled: { type: 'boolean', description: 'Enable or disable without deleting.' },
-        },
-        required: ['id'],
-      },
+      ...AGENDA_EDIT_TOOL,
       handler: async (args) => {
         const res = this.editEntryCore(typeof args.id === 'string' ? args.id.trim() : '', {
           prompt: typeof args.prompt === 'string' ? args.prompt : undefined,
@@ -744,19 +845,7 @@ export class AgendaWorld implements World {
 
   private removeTool(): ToolDef {
     return {
-      name: 'agenda_remove',
-      description:
-        'Remove an entry by id. Any entry can be removed, including ones the deployer added. ' +
-        'One-shot entries are removed automatically after firing.',
-      tags: ['write'],
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          id: { type: 'string', description: 'Entry id from agenda_list, e.g. ag-3f9c2a.' },
-        },
-        required: ['id'],
-      },
+      ...AGENDA_REMOVE_TOOL,
       handler: async (args) => {
         const res = this.removeEntryCore(typeof args.id === 'string' ? args.id.trim() : '');
         if (!res.ok) return res.error;
@@ -767,13 +856,7 @@ export class AgendaWorld implements World {
 
   private noteListTool(): ToolDef {
     return {
-      name: 'agenda_note_list',
-      description:
-        'List every note on the shared pad: id, full text, who wrote it, when it was written and last edited. ' +
-        'An empty pad returns usage hints. The whole pad is also delivered as an agenda.noteStarted event ' +
-        'whenever this World starts.',
-      tags: ['read'],
-      parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
+      ...AGENDA_NOTE_LIST_TOOL,
       handler: async () => this.renderNoteList(),
     };
   }
@@ -795,20 +878,7 @@ export class AgendaWorld implements World {
 
   private noteAddTool(): ToolDef {
     return {
-      name: 'agenda_note_add',
-      description:
-        `Write a new note on the shared pad. "text" is the note body, kept verbatim (max ${MAX_NOTE_CHARS} ` +
-        'chars); it is labelled with your name. The developer writes on the same pad from the console, and his ' +
-        'notes are labelled with his.',
-      tags: ['write'],
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          text: { type: 'string', description: `Note body (max ${MAX_NOTE_CHARS} chars).` },
-        },
-        required: ['text'],
-      },
+      ...AGENDA_NOTE_ADD_TOOL,
       handler: async (args) => {
         const res = this.addNoteCore(typeof args.text === 'string' ? args.text : '', 'agent');
         if (!res.ok) return `未写下:${res.error}`;
@@ -819,20 +889,7 @@ export class AgendaWorld implements World {
 
   private noteEditTool(): ToolDef {
     return {
-      name: 'agenda_note_edit',
-      description:
-        'Rewrite the text of one note by id. Any note can be edited, including ones the developer wrote; the ' +
-        'author label stays whoever wrote it first. To drop a note use agenda_note_remove.',
-      tags: ['write'],
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          id: { type: 'string', description: 'Note id from agenda_note_list, e.g. nt-3f9c2a.' },
-          text: { type: 'string', description: `New note body, replacing the old one (max ${MAX_NOTE_CHARS} chars).` },
-        },
-        required: ['id', 'text'],
-      },
+      ...AGENDA_NOTE_EDIT_TOOL,
       handler: async (args) => {
         const res = this.editNoteCore(
           typeof args.id === 'string' ? args.id.trim() : '',
@@ -847,19 +904,7 @@ export class AgendaWorld implements World {
 
   private noteRemoveTool(): ToolDef {
     return {
-      name: 'agenda_note_remove',
-      description:
-        'Remove one note by id. Any note can be removed, including ones the developer wrote. Removal is final: ' +
-        'the text is gone from the pad.',
-      tags: ['write'],
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          id: { type: 'string', description: 'Note id from agenda_note_list, e.g. nt-3f9c2a.' },
-        },
-        required: ['id'],
-      },
+      ...AGENDA_NOTE_REMOVE_TOOL,
       handler: async (args) => {
         const res = this.removeNoteCore(typeof args.id === 'string' ? args.id.trim() : '');
         if (!res.ok) return res.error;

@@ -49,13 +49,13 @@ Owner: `src/definition.ts`
 | `src/cron.ts` | cron 解析/匹配/下次触发,纯函数 |
 | `src/schedule.ts` | 排班:锚点、`every` 的间隔校验与文案、错过几拍,纯函数 |
 | `src/world.ts` | `World` 实现:调度循环、两条通道的事件与八个工具、两个面板的数据面(`invoke`) |
-| `src/console/client.ts` | 「日程条目」与「便签」两个面板前端;esbuild 打成 `dist/console.js` |
+| `src/webui/client.ts` | 「日程条目」与「便签」两个面板前端;esbuild 打成 `dist/webui.js` |
 | `src/ENV_PROMPT.md` | 环境提示词(两条通道共用一份);`{{agenda.*}}` 由 `envPromptVars()` 报值 |
 | `tests/` | cron 与排班的纯函数单测 + 注入时钟驱动的调度/工具/面板用例;`helpers/fake-host.ts` 记录推送口径 |
 
 ## 构建与装进部署
 
-1. `corepack pnpm install && corepack pnpm build:console`——控制台产物 `dist/console.js`
+1. `corepack pnpm install && corepack pnpm build:console`——控制台产物 `dist/webui.js`
    必须先打出来;`dist/` 不进包的 git,重装前要重新 build;
 2. 控制台安装本包目录(或 `corepack pnpm add --ignore-workspace <包路径>`)后重启进程;
 3. 启用 `worlds.agenda`(控制台 World 总览的开关,或部署 config.json);

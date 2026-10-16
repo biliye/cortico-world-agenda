@@ -15,18 +15,20 @@
   "main": "./src/index.ts",
   "cortico": {
     "kind": "world",
-    "api": 5,
-    "consoleClient": "dist/console.js"
+    "api": 6,
+    "webUiClient": "dist/webui.js",
+    "describe": "describe.json"
   },
   "files": [
     "src",
     "dist",
-    "README.md"
+    "README.md",
+    "describe.json"
   ],
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
-    "build:console": "esbuild src/console/client.ts --bundle --format=esm --outfile=dist/console.js --tsconfig=tsconfig.web.json"
+    "build:webui": "esbuild src/webui/client.ts --bundle --format=esm --outfile=dist/webui.js --tsconfig=tsconfig.web.json"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

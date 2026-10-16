@@ -1,5 +1,5 @@
 {
-  // Node 侧代码用这份(不带 DOM);面板源码 src/console 由 tsconfig.web.json 单独查。
+  // Node 侧代码用这份(不带 DOM);面板源码 src/webui 由 tsconfig.web.json 单独查。
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -21,5 +21,5 @@
     }
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["node_modules", "dist", "src/console"]
+  "exclude": ["node_modules", "dist", "src/webui"]
 }

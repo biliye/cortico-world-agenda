@@ -1,0 +1,267 @@
+{
+  "tools": [
+    {
+      "name": "agenda_list",
+      "description": "List every entry in the shared schedule: id, schedule (cron expr, repeat interval, or one-shot time), prompt, who asked for it, enabled flag, and next fire time (or expiry note for a one-shot). An empty table returns usage hints.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "列日程表里的全部条目:节律、提示词、谁加的、启停、下次几点响。",
+        "en": "Lists every schedule entry: schedule, prompt, who added it, enabled flag, and next fire time."
+      }
+    },
+    {
+      "name": "agenda_add",
+      "description": "Add a schedule entry. Supply exactly one of \"everyMinutes\" (repeat every N minutes, e.g. 40; counted from the previous fire, not aligned to the clock), \"cron\" (5-field expr: minute hour day-of-month month day-of-week, e.g. \"30 21 * * *\" = daily 21:30) or \"at\" (\"YYYY-MM-DDTHH:mm\" local time; fires once, then the entry is removed). \"prompt\" is the verbatim instruction delivered to you when it fires — make it self-contained. Set requestedBy to \"deployer\" when the developer asked for this entry (default \"agent\").",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "Verbatim instruction delivered at fire time (max 2000 chars)."
+          },
+          "everyMinutes": {
+            "type": "integer",
+            "description": "Repeat interval in minutes (40 = every 40 minutes, 120 = every 2 hours); a minimum applies. Mutually exclusive with cron and at."
+          },
+          "cron": {
+            "type": "string",
+            "description": "5-field cron expr, mutually exclusive with everyMinutes and at."
+          },
+          "at": {
+            "type": "string",
+            "description": "One-shot local time YYYY-MM-DDTHH:mm, mutually exclusive with everyMinutes and cron."
+          },
+          "requestedBy": {
+            "type": "string",
+            "enum": [
+              "deployer",
+              "agent"
+            ],
+            "description": "Who asked for this entry."
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "加一条日程:提示词必填,节律三选一(everyMinutes / cron / at)。",
+        "en": "Adds a schedule entry: prompt plus exactly one of everyMinutes, cron or at."
+      }
+    },
+    {
+      "name": "agenda_edit",
+      "description": "Edit an entry by id: change its prompt, reschedule it (supply exactly one of everyMinutes, cron or at; that switches its kind), or toggle enabled. A schedule change — or switching a disabled entry back on — restarts the countdown from now. Any entry can be edited, including ones the deployer added.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Entry id from agenda_list, e.g. ag-3f9c2a."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "New verbatim instruction (max 2000 chars)."
+          },
+          "everyMinutes": {
+            "type": "integer",
+            "description": "New repeat interval in minutes (40 = every 40 minutes); mutually exclusive with cron and at. Use this to change how often a repeating alarm fires."
+          },
+          "cron": {
+            "type": "string",
+            "description": "New 5-field cron expr; mutually exclusive with everyMinutes and at."
+          },
+          "at": {
+            "type": "string",
+            "description": "New one-shot local time; mutually exclusive with everyMinutes and cron."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable or disable without deleting."
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "按 id 改条目:改提示词、重排节律(三选一换种)、或启停。",
+        "en": "Edits an entry by id: change the prompt, reschedule it with one of the three forms, or toggle enabled."
+      }
+    },
+    {
+      "name": "agenda_remove",
+      "description": "Remove an entry by id. Any entry can be removed, including ones the deployer added. One-shot entries are removed automatically after firing.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Entry id from agenda_list, e.g. ag-3f9c2a."
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "按 id 删掉一条日程。",
+        "en": "Removes one schedule entry by id."
+      }
+    },
+    {
+      "name": "agenda_note_list",
+      "description": "List every note on the shared pad: id, full text, who wrote it, when it was written and last edited. An empty pad returns usage hints. The whole pad is also delivered as an agenda.noteStarted event whenever this World starts.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "列便签册上的全部纸条:正文、谁写的、写的与改的时刻。",
+        "en": "Lists every note on the shared pad: text, author, and when it was written and last edited."
+      }
+    },
+    {
+      "name": "agenda_note_add",
+      "description": "Write a new note on the shared pad. \"text\" is the note body, kept verbatim (max 2000 chars); it is labelled with your name. The developer writes on the same pad from the console, and his notes are labelled with his.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Note body (max 2000 chars)."
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "在共用便签册上写一张新纸条,记在你名下。",
+        "en": "Writes a new note on the shared pad, labelled with your name."
+      }
+    },
+    {
+      "name": "agenda_note_edit",
+      "description": "Rewrite the text of one note by id. Any note can be edited, including ones the developer wrote; the author label stays whoever wrote it first. To drop a note use agenda_note_remove.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Note id from agenda_note_list, e.g. nt-3f9c2a."
+          },
+          "text": {
+            "type": "string",
+            "description": "New note body, replacing the old one (max 2000 chars)."
+          }
+        },
+        "required": [
+          "id",
+          "text"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "按 id 重写一张纸条的正文;作者标仍归最早写它的人。",
+        "en": "Rewrites the text of one note by id; the author label stays whoever wrote it first."
+      }
+    },
+    {
+      "name": "agenda_note_remove",
+      "description": "Remove one note by id. Any note can be removed, including ones the developer wrote. Removal is final: the text is gone from the pad.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Note id from agenda_note_list, e.g. nt-3f9c2a."
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "tags": [
+        "write"
+      ],
+      "summary": {
+        "zh": "按 id 删掉一张纸条;删了就没了。",
+        "en": "Removes one note by id; removal is final."
+      }
+    }
+  ],
+  "events": [
+    {
+      "type": "agenda.started",
+      "description": {
+        "zh": "World 挂载完成,日程表已就位。",
+        "en": "The World was mounted and the schedule is in place."
+      }
+    },
+    {
+      "type": "agenda.noteStarted",
+      "description": {
+        "zh": "便签那一路的挂载报备;整册便签的正文随它交给你。",
+        "en": "The notepad lane announcing its mount; the whole pad is delivered with it."
+      }
+    },
+    {
+      "type": "agenda.due",
+      "description": {
+        "zh": "一条日程到点:提示词原样投出,补投时注明原定时刻与错过几拍。",
+        "en": "A schedule entry came due: its prompt is delivered verbatim, with the original time and missed slots when caught up."
+      },
+      "trigger": "flush"
+    },
+    {
+      "type": "agenda.noteSent",
+      "description": {
+        "zh": "开发者从控制台把当下的整册便签投给你。",
+        "en": "The developer pushed the current whole notepad to you from the console."
+      },
+      "trigger": "flush"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "worlds.agenda.envPrompt",
+      "title": "Agenda · 环境提示词",
+      "role": "envPrompt",
+      "content": "Agenda 这个环境给你两样东西:**一张日程表**(到点把一条提示投给你、当场叫醒你办事)和一册**便签**\n(你与开发者共写的小纸条,关机再开还在)。两样同住一个 World,工具名都带 `agenda` 前缀:\n日程是 `agenda_*`,便签是 `agenda_note_*`。\n\n**日程** —— `agenda_list` / `agenda_add` / `agenda_edit` / `agenda_remove`:\n\n- 到点的事以 `agenda.due` 出现:第一段是提示词原文,末行是条目元信息(编号、节律、谁要的)。\n  它当场叫醒你——醒来时没有别的事在排队,这条提示就是这一轮的主线。\n- 条目池是你与开发者共用的:看、加、改、删都可以,包括他加的条目;每条记着谁要的,那只是\n  事实标注,不是权限。\n- 时间三种写法,三选一:每隔 N 分钟(`everyMinutes`,如 40 = 每 40 分钟、120 = 每 2 小时;\n  下限 {{agenda.minInterval}} 分钟,从上次响过那一刻起算,不落整点)、cron 表达式(分 时 日 月 周,\n  `30 21 * * *` = 每天 21:30;只认 `* , - /` 和数字,不认 MON 这类名称)、一次性 `at`\n  (`2026-09-19T21:30` 这样的本地时间,触发后自动从表里删除)。都按本机时区算。\n- 他开口说「每天晚上提醒我…」就用 cron 写法落条目,说「每隔 40 分钟提醒我…」就用 every 写法;\n  加完把他要的那条念一遍(节律、下次触发时间)。要改间隔就带 `everyMinutes` 再改一次,回执里\n  会报这个间隔一天最多叫你几次——那也是一天几轮开销。\n- 循环条目(`every` 与 cron)响过之后留在表里,到下一拍再响;要停就改 `enabled` 或删掉。\n  你改节律、或把停用的条目重新启用,都从现在重新起算,不会立刻补响。\n- 错过只补一次:到点时进程没在跑(关机、World 停着),错过的那几拍摞成一条,下次起来时补投\n  一次——正文第二行会写「补投:原定 X,错过了几拍」,说明这条不是刚到点。补完从那时起算。\n  一次性 `at` 不补:过期就跳过,它留在表里标「已过期」,你顺手删掉它。\n- 提示词要自包含:醒来时这一轮只有这句话,没有「刚才聊到哪」的上下文——别写「接着刚才」。\n- 表里现在 {{agenda.summary}};上限 {{agenda.maxEntries}} 条,加满了会告诉你。\n- 日程只负责叫你,不保证结果:醒来后做不做、怎么做由你判断,涉及不可逆动作时照你的宪法来。\n\n**便签** —— `agenda_note_list` / `agenda_note_add` / `agenda_note_edit` / `agenda_note_remove`:\n\n- 每次这个 World 启动(进程开机、控制台里重启它)时,整册便签随一条 `agenda.noteStarted` 交给你,\n  正文是全部纸条,带上谁写的和什么时候写的。之后要翻用 `agenda_note_list`。\n- `agenda_note_add` 写一张、`agenda_note_edit` 改一张、`agenda_note_remove` 删一张。纸条上记的\n  「谁写的」是事实标注,不是权限:他写的你也能改、能删。一张最多 {{agenda.noteMaxChars}} 字。\n- 便签和你的 Memory 是两处:Memory 是你的状态;便签是你与他之间那一页看得见的纸条——他留给你的话、\n  你回他的话都放这儿,他下次开控制台就看得见。要不要把便签里的东西记进 Memory,你自己判断。\n- 现在 {{agenda.noteCount}} 张,上限 {{agenda.noteMax}} 张。\n"
+    }
+  ]
+}

@@ -7,9 +7,9 @@
  */
 
 import type {
-  ConsoleClientBundle,
-  ConsolePanelContext,
-  ConsoleTable,
+  WebUiClientBundle,
+  WebUiPanelContext,
+  WebUiTable,
 } from 'cortico/web/shared/client-panel.ts';
 
 /** 服务端 entryView 的形状。 */
@@ -62,7 +62,7 @@ export default {
     entries: { mount: (ctx) => void mountEntries(ctx) },
     notes: { mount: (ctx) => void mountNotes(ctx) },
   },
-} satisfies ConsoleClientBundle;
+} satisfies WebUiClientBundle;
 
 /** 周期表单的四档:每天 / 每周几 / 每隔 N 分钟 / 直接写表达式。表单的职责就是生成节律。 */
 type ScheduleMode = 'daily' | 'weekly' | 'every' | 'custom';
@@ -77,7 +77,7 @@ const WEEKDAYS: readonly { value: string; label: string }[] = [
   { value: '0', label: '周日' },
 ];
 
-async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
+async function mountEntries(ctx: WebUiPanelContext): Promise<void> {
   const ui = ctx.ui;
   let editingId: string | null = null;
   let kindValue: 'cron' | 'once' = 'cron';
@@ -93,7 +93,7 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
 
   const msg = ui.msgline();
   const rowbar = ui.rowbar();
-  const table: ConsoleTable = ui.table({
+  const table: WebUiTable = ui.table({
     head: ['状态', '节律', '下次触发', '提示词', '谁要的', '操作'],
     maxHeight: 'calc(100vh - 430px)',
   });
@@ -386,7 +386,7 @@ async function mountEntries(ctx: ConsolePanelContext): Promise<void> {
   }
 }
 
-async function mountNotes(ctx: ConsolePanelContext): Promise<void> {
+async function mountNotes(ctx: WebUiPanelContext): Promise<void> {
   const ui = ctx.ui;
   let editingId: string | null = null;
   let maxChars = 2000;
@@ -401,7 +401,7 @@ async function mountNotes(ctx: ConsolePanelContext): Promise<void> {
 
   const msg = ui.msgline();
   const rowbar = ui.rowbar();
-  const table: ConsoleTable = ui.table({
+  const table: WebUiTable = ui.table({
     head: ['谁写的', '正文', '写下', '改过', '操作'],
     maxHeight: 'calc(100vh - 430px)',
   });
