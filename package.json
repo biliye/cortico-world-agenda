@@ -2,11 +2,25 @@
   "name": "cortico-world-agenda",
   "version": "0.2.0",
   "type": "module",
-  "description": "Cortico World: a shared schedule that pushes prompt events at their due minute, plus a shared notepad delivered in full whenever the World starts",
+  "description": "Cortico World: 日程与便签 —— 到点把一条提示投给她并当场叫醒(循环闹钟 / 定时 / 一次性,错过只补一次),外加一册两人共写、开机整册交给她的便签。控制台有两个页签。要求 Cortico 0.2.0 及以上。",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/biliye/cortico-world-agenda.git"
+  },
+  "homepage": "https://github.com/biliye/cortico-world-agenda#readme",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "keywords": [
     "cortico-world",
-    "cortico"
+    "cortico",
+    "schedule",
+    "reminder",
+    "cron",
+    "notes",
+    "notepad"
   ],
   "engines": {
     "node": ">=22"
@@ -16,6 +30,11 @@
   "cortico": {
     "kind": "world",
     "api": 6,
+    "displayName": "日程与便签",
+    "tags": [
+      "memory",
+      "companion"
+    ],
     "webUiClient": "dist/webui.js",
     "describe": "describe.json"
   },
@@ -23,12 +42,15 @@
     "src",
     "dist",
     "README.md",
-    "describe.json"
+    "CHANGELOG.md",
+    "describe.json",
+    "LICENSE"
   ],
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
-    "build:webui": "esbuild src/webui/client.ts --bundle --format=esm --outfile=dist/webui.js --tsconfig=tsconfig.web.json"
+    "build:webui": "esbuild src/webui/client.ts --bundle --format=esm --outfile=dist/webui.js --tsconfig=tsconfig.web.json",
+    "prepublishOnly": "npm run typecheck && npm run test"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

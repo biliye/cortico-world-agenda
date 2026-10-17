@@ -53,18 +53,28 @@ Owner: `src/definition.ts`
 | `src/ENV_PROMPT.md` | 环境提示词(两条通道共用一份);`{{agenda.*}}` 由 `envPromptVars()` 报值 |
 | `tests/` | cron 与排班的纯函数单测 + 注入时钟驱动的调度/工具/面板用例;`helpers/fake-host.ts` 记录推送口径 |
 
-## 构建与装进部署
+## 怎么装
 
-1. `corepack pnpm install && corepack pnpm build:console`——控制台产物 `dist/webui.js`
-   必须先打出来;`dist/` 不进包的 git,重装前要重新 build;
-2. 控制台安装本包目录(或 `corepack pnpm add --ignore-workspace <包路径>`)后重启进程;
-3. 启用 `worlds.agenda`(控制台 World 总览的开关,或部署 config.json);
-4. 时间线应出现 `agenda.started` 与 `agenda.noteStarted`;Agenda 详情页出现「日程条目」与「便签」
-   两个页签。
+要求 **Cortico 0.2.0 及以上**（扩展契约 `world` 6；0.1.x 不认识这个版本号，装载时直接拒绝）。
 
-**从「agenda + note 两个 World」搬过来**:先停实例,把 `worlds.note.notes` 挪进 `worlds.agenda.notes`
-(`state/tools/migrate-note-into-agenda.mjs` 干这活),卸掉 `cortico-world-note` 包,删掉
-`worlds.note` 那一段,再装本包并重启。留着旧的 note 包会多出一册各写各的便签。
+- **扩展市场**：控制台「扩展 → 扩展市场」搜 `cortico-world-agenda`，点安装，然后重启进程。
+  npm 上的包已经带好 `dist/webui.js`，不用自己构建。
+- **手动**：在部署目录里 `corepack pnpm add --ignore-workspace cortico-world-agenda --registry=https://registry.npmjs.org/`
+  （本机默认源常是只读镜像，要显式指官方源），或在控制台里安装本包目录。
+
+启用 `worlds.agenda`（控制台 World 总览的开关，或部署 config.json），时间线应出现
+`agenda.started` 与 `agenda.noteStarted`；Agenda 详情页出现「日程条目」与「便签」两个页签。
+
+## 从源码构建
+
+1. `corepack pnpm install && corepack pnpm build:webui`——面板产物 `dist/webui.js`
+   必须先打出来；`dist/` 不进包的 git，从仓库克隆后要自己 build（npm 包里已带好）；
+2. 装进部署，重启进程，再按上一节启用。
+
+**从「agenda + note 两个 World」搬过来**：先停实例，把 `worlds.note.notes` 里每张纸条按
+`{ id, text, author, createdAt }` 的形状抄进 `worlds.agenda.notes`（id 用 `nt-` 加 6 位十六进制），
+卸掉 `cortico-world-note` 包，删掉 `worlds.note` 那一段，再装本包并重启。留着旧的 note 包会多出
+一册各写各的便签。
 
 ## 第三级目击清单
 
