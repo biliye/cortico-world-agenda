@@ -1,7 +1,10 @@
 {
   "name": "cortico-world-agenda",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
+  "author": {
+    "name": "筆離嘢"
+  },
   "description": "Cortico World: 日程与便签 —— 到点把一条提示投给她并当场叫醒(循环闹钟 / 定时 / 一次性,错过只补一次),外加一册两人共写、开机整册交给她的便签。控制台有两个页签。要求 Cortico 0.2.0 及以上。",
   "license": "MIT",
   "repository": {
