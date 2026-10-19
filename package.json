@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-agenda",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Cortico World: 日程与便签 —— 到点把一条提示投给她并当场叫醒(循环闹钟 / 定时 / 一次性,错过只补一次),外加一册两人共写、开机整册交给她的便签。控制台有两个页签。要求 Cortico 0.2.0 及以上。",
   "license": "MIT",
@@ -31,16 +31,24 @@
     "kind": "world",
     "api": 6,
     "displayName": "日程与便签",
+    "icon": "assets/icon.svg",
     "tags": [
       "memory",
       "companion"
     ],
+    "locales": {
+      "en": {
+        "displayName": "Schedule & Notes",
+        "description": "Cortico World: a shared schedule that wakes the bot with a prompt at its due minute (repeat interval, cron or one-shot; missed periods are caught up once), plus a shared notepad delivered in full whenever the World starts. Two console tabs. Requires Cortico 0.2.0 or later."
+      }
+    },
     "webUiClient": "dist/webui.js",
     "describe": "describe.json"
   },
   "files": [
     "src",
     "dist",
+    "assets",
     "README.md",
     "CHANGELOG.md",
     "describe.json",

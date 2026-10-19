@@ -2,6 +2,19 @@
 
 市场按版本显示这里的 `## <版本号>` 一段。
 
+## 0.2.1
+
+按 Cortico 官方的扩展发布规范补齐市场元数据，**行为零改动**：
+
+- **标签**（`cortico.tags`，依据索引仓的 TAGS.md）：`memory` —— 便签是词表里 `notes` 那一条；
+  `companion` —— 到点叫她、每天例行与「她先开口」属于 `daily routine / sense of time / speaking first`。
+  两个都是普通标签，没有警示标签。
+- **图标**：`cortico.icon` 指向包内 `assets/icon.svg`（日历 + 便签），市场卡片与详情页用它。
+- **英文名与简介**：`cortico.locales.en`（`Schedule & Notes`），英文界面下覆盖中文的
+  `displayName` 与 `description`。
+- 其余保持不变：`describe.json`、`CHANGELOG.md`、`repository` / `homepage` / `publishConfig`、
+  `prepublishOnly`。
+
 ## 0.2.0
 
 首次发布。一个 World 同时提供两张 bot 与开发者共用的清单：

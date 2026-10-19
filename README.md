@@ -12,6 +12,15 @@ Owner: `src/definition.ts`
 两张清单各有一套四个工具,各占控制台 `world:agenda` 页上的一个页签(「日程条目」/「便签」)。
 合成一个 World 是因为它们除触发方式外是同一件东西:住配置里的一段清单 + 一套增删改查 + 一块面板。
 
+## 市场标签
+
+按官方索引仓的 [TAGS.md](https://github.com/Pal-AI-Lab/cortico-extensions/blob/main/TAGS.md) 选了两个普通标签:
+
+- **`memory`**:便签册 —— 词表里 `notes` 正属于这一条(帮 bot 记住、翻看过去的东西);
+- **`companion`**:到点叫她、每天例行、她先开口 —— 对应 `daily routine / sense of time / speaking first`。
+
+两个都不是警示标签。卡片图标是包内 `assets/icon.svg`,英文界面显示 `Schedule & Notes`(`cortico.locales.en`)。
+
 ## 它做什么
 
 ### 日程
