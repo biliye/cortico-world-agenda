@@ -12,6 +12,19 @@ Owner: `src/definition.ts`
 两张清单各有一套四个工具,各占控制台 `world:agenda` 页上的一个页签(「日程条目」/「便签」)。
 合成一个 World 是因为它们除触发方式外是同一件东西:住配置里的一段清单 + 一套增删改查 + 一块面板。
 
+## 在 Coopanion(Coo)上使用
+
+已在 **Coopanion 0.2.5**(Windows x64 便携版)上装机验收:市场里检查与安装成功,重启后**导入成功**;
+启用后便签的增、改、查、删与整册投递都正常,还用真实模型跑过一轮(模型读到口令 → 写便签 → 列出来确认 → 回复)。
+这一次没有单独测「到点投递」,它在日常实例上一直在跑。
+
+Coo 的扩展市场默认可能走镜像源(npmmirror),镜像上偶尔还没有新版本 —— 检查时报「registry 没有给出
+cortico-world-agenda 的 x.y.z 版本」,就把 Coo 的扩展源改成官方 `https://registry.npmjs.org` 再装。
+装完或改过配置要**整进程重启** Coo 才生效。
+
+**遇到问题**:去 GitHub 开 issue —— https://github.com/biliye/cortico-world-agenda/issues;
+或者到 QQ 群里 @筆離嘢(和作者名同名)。附上 Coo 版本、本包版本和报错截图,再说清是哪一步出的。
+
 ## 市场标签
 
 按官方索引仓的 [TAGS.md](https://github.com/Pal-AI-Lab/cortico-extensions/blob/main/TAGS.md) 选了两个普通标签:
